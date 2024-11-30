@@ -9,13 +9,13 @@ use crate::midi::{MidiEvent, MidiTrack};
 use crate::notes::Note;
 
 #[derive(Asset, TypePath)]
-pub struct WavAudio {
+pub struct MidiAudio {
 	pub midi_track: MidiTrack,
 	pub bytes: &'static [u8],
 	pub baseline_note: Note,
 }
 
-pub struct WavDecoder {
+pub struct MidiDecoder {
 	midi_track: MidiTrack,
 	header: WavSpec,
 	samples: Vec<Vec<i16>>,
@@ -29,7 +29,7 @@ pub struct WavDecoder {
 	baseline_note: Note,
 }
 
-impl WavDecoder {
+impl MidiDecoder {
 	fn new<R: io::Read>(midi_track: MidiTrack, reader: WavReader<R>, baseline_note: Note) -> Self {
 		let header = reader.spec();
 
@@ -38,7 +38,7 @@ impl WavDecoder {
 		let ticks_per_beat = midi_track.ticks_per_beat as f64;
 		let ticks_per_sample = (ticks_per_beat * beats_per_second) / samples_per_second;
 
-		WavDecoder {
+		MidiDecoder {
 			midi_track,
 			header,
 			samples: match (header.sample_format, header.bits_per_sample) {
@@ -93,7 +93,7 @@ impl WavDecoder {
 	}
 }
 
-impl Iterator for WavDecoder {
+impl Iterator for MidiDecoder {
 	type Item = i16;
 
 	fn next(&mut self) -> Option<Self::Item> {
@@ -150,7 +150,7 @@ impl Iterator for WavDecoder {
 	}
 }
 
-impl Source for WavDecoder {
+impl Source for MidiDecoder {
 	fn current_frame_len(&self) -> Option<usize> {
 		None
 	}
@@ -168,13 +168,13 @@ impl Source for WavDecoder {
 	}
 }
 
-impl Decodable for WavAudio {
-	type DecoderItem = <WavDecoder as Iterator>::Item;
+impl Decodable for MidiAudio {
+	type DecoderItem = <MidiDecoder as Iterator>::Item;
 
-	type Decoder = WavDecoder;
+	type Decoder = MidiDecoder;
 
 	fn decoder(&self) -> Self::Decoder {
-		WavDecoder::new(
+		MidiDecoder::new(
 			self.midi_track.clone(),
 			WavReader::new(Cursor::new(self.bytes)).unwrap(),
 			self.baseline_note,

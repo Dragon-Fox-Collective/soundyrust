@@ -1,12 +1,6 @@
-use bevy::audio::{AddAudioSource, AudioPlugin};
+use bevy::audio::AudioPlugin;
 use bevy::prelude::*;
-use midi::MidiTrack;
-use notes::Note;
-use source::WavAudio;
-
-mod midi;
-pub mod notes;
-mod source;
+use soundyrust::*;
 
 fn main() {
 	let mut app = App::new();
@@ -14,13 +8,13 @@ fn main() {
 		global_volume: GlobalVolume::new(0.2),
 		..default()
 	}))
-	.add_audio_source::<WavAudio>()
+	.add_plugins(SoundyPlugin)
 	.add_systems(Startup, setup)
 	.run();
 }
 
-fn setup(mut assets: ResMut<Assets<WavAudio>>, mut commands: Commands) {
-	let audio_handle = assets.add(WavAudio {
+fn setup(mut assets: ResMut<Assets<MidiAudio>>, mut commands: Commands) {
+	let audio_handle = assets.add(MidiAudio {
 		midi_track: MidiTrack::from_bytes(include_bytes!("../assets/fray.mid")),
 		bytes: include_bytes!("../assets/flute.wav"),
 		baseline_note: Note::C4,
