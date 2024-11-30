@@ -118,12 +118,18 @@ impl Iterator for WavDecoder {
 		let sample = self
 			.voices
 			.iter()
-			.map(|voice| self.samples[voice.sample.floor() as usize])
+			.map(|voice| {
+				let floor = self.samples[voice.sample.floor() as usize];
+				let ceil = self.samples[voice.sample.ceil() as usize];
+				let fraction = voice.sample.fract() as f32;
+				let interpolated = ceil as f32 * fraction + floor as f32 * (1.0 - fraction);
+				interpolated as i16
+			})
 			.sum();
 
 		self.voices.iter_mut().for_each(Voice::tick);
 		self.voices
-			.retain(|voice| (voice.sample as usize) < self.samples.len());
+			.retain(|voice| (voice.sample.ceil() as usize) < self.samples.len());
 		self.current_channel = (self.current_channel + 1) % self.header.channels;
 
 		Some(sample)
