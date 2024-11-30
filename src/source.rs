@@ -5,28 +5,31 @@ use helgoboss_midi::StructuredShortMessage;
 use hound::{SampleFormat, WavReader, WavSpec};
 
 use crate::midi::{MidiEvent, MidiTrack};
+use crate::notes::Note;
 
 #[derive(Asset, TypePath)]
 pub struct WavAudio {
 	pub midi_track: MidiTrack,
 	pub bytes: &'static [u8],
+	pub baseline_note: Note,
 }
 
 pub struct WavDecoder {
 	midi_track: MidiTrack,
 	header: WavSpec,
 	samples: Vec<i16>,
-	voices: Vec<usize>,
+	voices: Vec<Voice>,
 	current_channel: u16,
 	beats_per_second: f64,
 	ticks_per_beat: f64,
 	ticks_per_sample: f64,
 	tick: f64,
 	event_index: usize,
+	baseline_note: Note,
 }
 
 impl WavDecoder {
-	fn new<R: io::Read>(midi_track: MidiTrack, reader: WavReader<R>) -> Self {
+	fn new<R: io::Read>(midi_track: MidiTrack, reader: WavReader<R>, baseline_note: Note) -> Self {
 		let header = reader.spec();
 
 		let samples_per_second = header.sample_rate as f64;
@@ -68,6 +71,7 @@ impl WavDecoder {
 			ticks_per_sample,
 			tick: 0.0,
 			event_index: 0,
+			baseline_note,
 		}
 	}
 }
@@ -86,8 +90,19 @@ impl Iterator for WavDecoder {
 				.filter(|event| event.time <= self.tick as u64)
 			{
 				match event.inner {
-					MidiEvent::Message(StructuredShortMessage::NoteOn { .. }) => {
-						self.voices.push(0);
+					MidiEvent::Message(StructuredShortMessage::NoteOn { key_number, .. }) => {
+						println!(
+							"NoteOn: {} (x{} relative to {})",
+							Note::from_position(key_number.into()),
+							Note::from_position(key_number.into()).frequency
+								/ self.baseline_note.frequency,
+							self.baseline_note
+						);
+						self.voices.push(Voice {
+							speed: Note::from_position(key_number.into()).frequency
+								/ self.baseline_note.frequency,
+							sample: 0.0,
+						});
 					}
 					_ => {}
 				}
@@ -100,14 +115,15 @@ impl Iterator for WavDecoder {
 			}
 		}
 
-		let sample = self.voices.iter().map(|&index| self.samples[index]).sum();
-
-		self.voices = self
+		let sample = self
 			.voices
 			.iter()
-			.map(|&index| index + 1)
-			.filter(|&index| index < self.samples.len())
-			.collect();
+			.map(|voice| self.samples[voice.sample.floor() as usize])
+			.sum();
+
+		self.voices.iter_mut().for_each(Voice::tick);
+		self.voices
+			.retain(|voice| (voice.sample as usize) < self.samples.len());
 		self.current_channel = (self.current_channel + 1) % self.header.channels;
 
 		Some(sample)
@@ -141,9 +157,23 @@ impl Decodable for WavAudio {
 		WavDecoder::new(
 			self.midi_track.clone(),
 			WavReader::new(Cursor::new(self.bytes)).unwrap(),
+			self.baseline_note,
 		)
 	}
 }
+
+struct Voice {
+	speed: f32,
+	sample: f64,
+}
+
+impl Voice {
+	fn tick(&mut self) {
+		self.sample += self.speed as f64;
+	}
+}
+
+// Taken from rodio
 
 /// Returns a 32 bit WAV float as an i16. WAV floats are typically in the range of
 /// [-1.0, 1.0] while i16s are in the range [-32768, 32767]. Note that this
