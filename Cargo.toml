@@ -13,7 +13,3 @@ itertools = "0.13.0"
 [lib]
 name = "soundyrust"
 path = "src/lib.rs"
-
-[[bin]]
-name = "soundyrust-bin"
-path = "src/main.rs"
