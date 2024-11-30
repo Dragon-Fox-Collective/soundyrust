@@ -15,7 +15,7 @@ pub enum NoteLetter {
 pub struct Note {
 	pub note_letter: NoteLetter,
 	pub sharp: bool,
-	pub octave: u8,
+	pub octave: i8,
 
 	/// In Hz
 	pub frequency: f32,
@@ -34,6 +34,78 @@ impl Display for Note {
 }
 
 impl Note {
+	pub const CN1: Note = Note {
+		note_letter: NoteLetter::C,
+		sharp: false,
+		octave: -1,
+		frequency: 8.175,
+	};
+	pub const CSN1: Note = Note {
+		note_letter: NoteLetter::C,
+		sharp: true,
+		octave: -1,
+		frequency: 8.661,
+	};
+	pub const DN1: Note = Note {
+		note_letter: NoteLetter::D,
+		sharp: false,
+		octave: -1,
+		frequency: 9.176,
+	};
+	pub const DSN1: Note = Note {
+		note_letter: NoteLetter::D,
+		sharp: true,
+		octave: -1,
+		frequency: 9.722,
+	};
+	pub const EN1: Note = Note {
+		note_letter: NoteLetter::E,
+		sharp: false,
+		octave: -1,
+		frequency: 10.30,
+	};
+	pub const FN1: Note = Note {
+		note_letter: NoteLetter::F,
+		sharp: false,
+		octave: -1,
+		frequency: 10.91,
+	};
+	pub const FSN1: Note = Note {
+		note_letter: NoteLetter::F,
+		sharp: true,
+		octave: -1,
+		frequency: 11.56,
+	};
+	pub const GN1: Note = Note {
+		note_letter: NoteLetter::G,
+		sharp: false,
+		octave: -1,
+		frequency: 12.25,
+	};
+	pub const GSN1: Note = Note {
+		note_letter: NoteLetter::G,
+		sharp: true,
+		octave: -1,
+		frequency: 12.98,
+	};
+	pub const AN1: Note = Note {
+		note_letter: NoteLetter::A,
+		sharp: false,
+		octave: -1,
+		frequency: 13.75,
+	};
+	pub const ASN1: Note = Note {
+		note_letter: NoteLetter::A,
+		sharp: true,
+		octave: -1,
+		frequency: 14.57,
+	};
+	pub const BN1: Note = Note {
+		note_letter: NoteLetter::B,
+		sharp: false,
+		octave: -1,
+		frequency: 15.43,
+	};
 	pub const C0: Note = Note {
 		note_letter: NoteLetter::C,
 		sharp: false,
@@ -682,8 +754,77 @@ impl Note {
 		octave: 8,
 		frequency: 7902.13,
 	};
+	pub const C9: Note = Note {
+		note_letter: NoteLetter::C,
+		sharp: false,
+		octave: 9,
+		frequency: 8372.02,
+	};
+	pub const CS9: Note = Note {
+		note_letter: NoteLetter::C,
+		sharp: true,
+		octave: 9,
+		frequency: 8869.84,
+	};
+	pub const D9: Note = Note {
+		note_letter: NoteLetter::D,
+		sharp: false,
+		octave: 9,
+		frequency: 9397.27,
+	};
+	pub const DS9: Note = Note {
+		note_letter: NoteLetter::D,
+		sharp: true,
+		octave: 9,
+		frequency: 10548.1,
+	};
+	pub const E9: Note = Note {
+		note_letter: NoteLetter::E,
+		sharp: false,
+		octave: 9,
+		frequency: 11175.3,
+	};
+	pub const F9: Note = Note {
+		note_letter: NoteLetter::F,
+		sharp: false,
+		octave: 9,
+		frequency: 11839.8,
+	};
+	pub const FS9: Note = Note {
+		note_letter: NoteLetter::F,
+		sharp: true,
+		octave: 9,
+		frequency: 12543.8,
+	};
+	pub const G9: Note = Note {
+		note_letter: NoteLetter::G,
+		sharp: false,
+		octave: 9,
+		frequency: 13289.7,
+	};
 
-	pub const NOTES: [Note; 99] = [
+	pub const NOTES: [Note; 128] = [
+		Note::CN1,
+		Note::CSN1,
+		Note::DN1,
+		Note::DSN1,
+		Note::EN1,
+		Note::FN1,
+		Note::FSN1,
+		Note::GN1,
+		Note::GSN1,
+		Note::AN1,
+		Note::ASN1,
+		Note::BN1,
+		Note::C0,
+		Note::CS0,
+		Note::D0,
+		Note::DS0,
+		Note::E0,
+		Note::F0,
+		Note::FS0,
+		Note::G0,
+		Note::GS0,
 		Note::A0,
 		Note::AS0,
 		Note::B0,
@@ -783,15 +924,23 @@ impl Note {
 		Note::A8,
 		Note::AS8,
 		Note::B8,
+		Note::C9,
+		Note::CS9,
+		Note::D9,
+		Note::DS9,
+		Note::E9,
+		Note::F9,
+		Note::FS9,
+		Note::G9,
 	];
 
-	/// Relative to C0 on a C major scale
-	pub fn position(&self) -> u32 {
-		self.octave as u32 * 7 + self.note_letter as u32
+	/// Relative to C-1 (the lowest midi note)
+	pub fn position(&self) -> u8 {
+		(self.octave * 7 + self.note_letter as i8) as u8
 	}
 
-	/// Relative to C0 on a C major scale
-	pub fn from_position(position: usize) -> Self {
-		Self::NOTES[position]
+	/// Relative to C-1 (the lowest midi note)
+	pub fn from_position(position: u8) -> Self {
+		Self::NOTES[position as usize]
 	}
 }

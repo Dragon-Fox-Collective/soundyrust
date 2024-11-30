@@ -3,6 +3,7 @@ use std::io::{self, Cursor};
 use bevy::{audio::Source, prelude::*, utils::Duration};
 use helgoboss_midi::StructuredShortMessage;
 use hound::{SampleFormat, WavReader, WavSpec};
+use itertools::Itertools;
 
 use crate::midi::{MidiEvent, MidiTrack};
 use crate::notes::Note;
@@ -17,7 +18,7 @@ pub struct WavAudio {
 pub struct WavDecoder {
 	midi_track: MidiTrack,
 	header: WavSpec,
-	samples: Vec<i16>,
+	samples: Vec<Vec<i16>>,
 	voices: Vec<Voice>,
 	current_channel: u16,
 	beats_per_second: f64,
@@ -44,21 +45,37 @@ impl WavDecoder {
 				(SampleFormat::Float, 32) => reader
 					.into_samples()
 					.map(|value| f32_to_i16(value.unwrap()))
+					.chunks(header.channels as usize)
+					.into_iter()
+					.map(|chunk| chunk.collect())
 					.collect(),
 				(SampleFormat::Int, 8) => reader
 					.into_samples()
 					.map(|value| i8_to_i16(value.unwrap()))
+					.chunks(header.channels as usize)
+					.into_iter()
+					.map(|chunk| chunk.collect())
 					.collect(),
-				(SampleFormat::Int, 16) => {
-					reader.into_samples().map(|value| value.unwrap()).collect()
-				}
+				(SampleFormat::Int, 16) => reader
+					.into_samples()
+					.map(|value| value.unwrap())
+					.chunks(header.channels as usize)
+					.into_iter()
+					.map(|chunk| chunk.collect())
+					.collect(),
 				(SampleFormat::Int, 24) => reader
 					.into_samples()
 					.map(|value| i24_to_i16(value.unwrap()))
+					.chunks(header.channels as usize)
+					.into_iter()
+					.map(|chunk| chunk.collect())
 					.collect(),
 				(SampleFormat::Int, 32) => reader
 					.into_samples()
 					.map(|value| i32_to_i16(value.unwrap()))
+					.chunks(header.channels as usize)
+					.into_iter()
+					.map(|chunk| chunk.collect())
 					.collect(),
 				(sample_format, bits_per_sample) => {
 					panic!("Unimplemented wav spec: {sample_format:?}, {bits_per_sample}")
@@ -91,13 +108,6 @@ impl Iterator for WavDecoder {
 			{
 				match event.inner {
 					MidiEvent::Message(StructuredShortMessage::NoteOn { key_number, .. }) => {
-						println!(
-							"NoteOn: {} (x{} relative to {})",
-							Note::from_position(key_number.into()),
-							Note::from_position(key_number.into()).frequency
-								/ self.baseline_note.frequency,
-							self.baseline_note
-						);
 						self.voices.push(Voice {
 							speed: Note::from_position(key_number.into()).frequency
 								/ self.baseline_note.frequency,
@@ -119,17 +129,21 @@ impl Iterator for WavDecoder {
 			.voices
 			.iter()
 			.map(|voice| {
-				let floor = self.samples[voice.sample.floor() as usize];
-				let ceil = self.samples[voice.sample.ceil() as usize];
+				let floor =
+					self.samples[voice.sample.floor() as usize][self.current_channel as usize];
+				let ceil =
+					self.samples[voice.sample.ceil() as usize][self.current_channel as usize];
 				let fraction = voice.sample.fract() as f32;
 				let interpolated = ceil as f32 * fraction + floor as f32 * (1.0 - fraction);
 				interpolated as i16
 			})
 			.sum();
 
-		self.voices.iter_mut().for_each(Voice::tick);
-		self.voices
-			.retain(|voice| (voice.sample.ceil() as usize) < self.samples.len());
+		if self.current_channel == 0 {
+			self.voices.iter_mut().for_each(Voice::tick);
+			self.voices
+				.retain(|voice| (voice.sample.ceil() as usize) < self.samples.len());
+		}
 		self.current_channel = (self.current_channel + 1) % self.header.channels;
 
 		Some(sample)
