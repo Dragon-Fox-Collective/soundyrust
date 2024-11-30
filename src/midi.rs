@@ -1,65 +1,11 @@
+use std::borrow::Borrow;
 use std::collections::VecDeque;
-use std::time::Duration;
+use std::ops::Index;
 
-use augmented_midi::{MIDIFile, MIDIFileChunk, MIDIFileDivision, MIDITrackEvent, MIDITrackInner};
-use bevy::prelude::*;
+use augmented_midi::{
+	parse_midi_file, MIDIFile, MIDIFileChunk, MIDIFileDivision, MIDITrackEvent, MIDITrackInner,
+};
 use helgoboss_midi::{ShortMessageFactory, StructuredShortMessage};
-
-#[derive(Component)]
-pub struct MidiSequencer {
-	midi_track: MidiTrack,
-	tick: f64,
-	event_index: usize,
-	beat: f32,
-	bpm: f64,
-	delay: Option<Duration>,
-}
-
-impl MidiSequencer {
-	fn new(midi_track: MidiTrack) -> Self {
-		Self {
-			midi_track,
-			tick: 0.0,
-			event_index: 0,
-			beat: 0.0,
-			bpm: 120.0,
-			delay: Some(Duration::from_secs_f32(1.0)),
-		}
-	}
-
-	pub fn tick(&mut self, delta: Duration) {
-		let delta_ticks =
-			self.midi_track.ticks_per_beat as f64 * self.bpm / 60.0 * delta.as_secs_f64();
-		self.tick += delta_ticks;
-
-		while let Some(event) = self
-			.midi_track
-			.events
-			.get(self.event_index)
-			.filter(|event| event.time <= self.tick as u64)
-		{
-			match event.inner {
-				MidiEvent::Meta(MidiMetaEvent::Tempo { tempo }) => {
-					self.bpm = tempo;
-				}
-				MidiEvent::Message(message) => {}
-			}
-			self.event_index += 1;
-		}
-
-		let delta_beat = self.time_to_bpm_beat(delta);
-		self.beat += delta_beat;
-
-		if self.event_index >= self.midi_track.events.len() {
-			self.event_index = 0;
-			self.tick -= self.midi_track.events.last().unwrap().time as f64;
-		}
-	}
-
-	pub fn time_to_bpm_beat(&self, time: Duration) -> f32 {
-		(time.as_secs_f64() * self.bpm / 60.0) as f32
-	}
-}
 
 #[derive(Debug, Clone)]
 pub struct MidiTrackAccumulateEvent {
@@ -74,10 +20,15 @@ pub struct MidiTrack {
 }
 
 impl MidiTrack {
-	pub fn from_midi_file(file: MIDIFile<String, Vec<u8>>) -> Self {
+	pub fn from_midi_file<
+		StringRepr: Borrow<str>,
+		Buffer: Borrow<[u8]> + Clone + Index<usize, Output = u8>,
+	>(
+		file: MIDIFile<StringRepr, Buffer>,
+	) -> Self {
 		let mut events = Vec::new();
 		let mut time = 0_u64;
-		let mut tracks: Vec<VecDeque<MIDITrackEvent<Vec<u8>>>> = file
+		let mut tracks: Vec<VecDeque<MIDITrackEvent<Buffer>>> = file
 			.chunks
 			.iter()
 			.filter_map(|chunk| match chunk {
@@ -162,6 +113,14 @@ impl MidiTrack {
 				_ => panic!("Invalid MIDI file division"),
 			},
 		}
+	}
+
+	pub fn from_bytes(bytes: &[u8]) -> Self {
+		Self::from_midi_file(
+			parse_midi_file::<String, Vec<u8>>(bytes)
+				.expect("Failed to parse MIDI file")
+				.1,
+		)
 	}
 }
 

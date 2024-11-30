@@ -1,25 +1,41 @@
 use std::io::{self, Cursor};
-use std::sync::mpsc::Receiver;
 
-use bevy::{audio::Source, prelude::*, reflect::TypePath, utils::Duration};
+use bevy::{audio::Source, prelude::*, utils::Duration};
 use helgoboss_midi::StructuredShortMessage;
 use hound::{SampleFormat, WavReader, WavSpec};
 
+use crate::midi::{MidiEvent, MidiTrack};
+
 #[derive(Asset, TypePath)]
 pub struct WavAudio {
+	pub midi_track: MidiTrack,
 	pub bytes: &'static [u8],
 }
 
 pub struct WavDecoder {
+	midi_track: MidiTrack,
 	header: WavSpec,
 	samples: Vec<i16>,
 	voices: Vec<usize>,
+	current_channel: u16,
+	beats_per_second: f64,
+	ticks_per_beat: f64,
+	ticks_per_sample: f64,
+	tick: f64,
+	event_index: usize,
 }
 
 impl WavDecoder {
-	fn new<R: io::Read>(reader: WavReader<R>) -> Self {
+	fn new<R: io::Read>(midi_track: MidiTrack, reader: WavReader<R>) -> Self {
 		let header = reader.spec();
+
+		let samples_per_second = header.sample_rate as f64;
+		let beats_per_second = 120.0 / 60.0;
+		let ticks_per_beat = midi_track.ticks_per_beat as f64;
+		let ticks_per_sample = (ticks_per_beat * beats_per_second) / samples_per_second;
+
 		WavDecoder {
+			midi_track,
 			header,
 			samples: match (header.sample_format, header.bits_per_sample) {
 				(SampleFormat::Float, 32) => reader
@@ -45,7 +61,13 @@ impl WavDecoder {
 					panic!("Unimplemented wav spec: {sample_format:?}, {bits_per_sample}")
 				}
 			},
-			voices: vec![0],
+			voices: vec![],
+			current_channel: 0,
+			beats_per_second,
+			ticks_per_beat,
+			ticks_per_sample,
+			tick: 0.0,
+			event_index: 0,
 		}
 	}
 }
@@ -54,13 +76,40 @@ impl Iterator for WavDecoder {
 	type Item = i16;
 
 	fn next(&mut self) -> Option<Self::Item> {
+		if self.current_channel == 0 {
+			self.tick += self.ticks_per_sample;
+
+			while let Some(event) = self
+				.midi_track
+				.events
+				.get(self.event_index)
+				.filter(|event| event.time <= self.tick as u64)
+			{
+				match event.inner {
+					MidiEvent::Message(StructuredShortMessage::NoteOn { .. }) => {
+						self.voices.push(0);
+					}
+					_ => {}
+				}
+				self.event_index += 1;
+
+				if self.event_index >= self.midi_track.events.len() {
+					self.event_index = 0;
+					self.tick = 0.0;
+				}
+			}
+		}
+
 		let sample = self.voices.iter().map(|&index| self.samples[index]).sum();
+
 		self.voices = self
 			.voices
 			.iter()
 			.map(|&index| index + 1)
 			.filter(|&index| index < self.samples.len())
 			.collect();
+		self.current_channel = (self.current_channel + 1) % self.header.channels;
+
 		Some(sample)
 	}
 }
@@ -89,7 +138,10 @@ impl Decodable for WavAudio {
 	type Decoder = WavDecoder;
 
 	fn decoder(&self) -> Self::Decoder {
-		WavDecoder::new(WavReader::new(Cursor::new(self.bytes)).unwrap())
+		WavDecoder::new(
+			self.midi_track.clone(),
+			WavReader::new(Cursor::new(self.bytes)).unwrap(),
+		)
 	}
 }
 

@@ -1,5 +1,6 @@
 use bevy::audio::{AddAudioSource, AudioPlugin};
 use bevy::prelude::*;
+use midi::MidiTrack;
 use source::WavAudio;
 
 mod midi;
@@ -18,10 +19,11 @@ fn main() {
 
 fn setup(mut assets: ResMut<Assets<WavAudio>>, mut commands: Commands) {
 	let audio_handle = assets.add(WavAudio {
+		midi_track: MidiTrack::from_bytes(include_bytes!("../assets/fray.mid")),
 		bytes: include_bytes!("../assets/flute.wav"),
 	});
-	commands.spawn(AudioSourceBundle {
+	commands.spawn((AudioSourceBundle {
 		source: audio_handle,
 		..default()
-	});
+	},));
 }
