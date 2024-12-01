@@ -11,7 +11,9 @@ fn main() {
 		global_volume: GlobalVolume::new(0.2),
 		..default()
 	}))
-	.add_plugins(SoundyPlugin)
+	.add_plugins(SoundyPlugin {
+		buffer_size: Some(256), // Enough for once a frame to handle
+	})
 	.add_systems(Startup, setup)
 	.add_systems(Update, check_info)
 	.run();

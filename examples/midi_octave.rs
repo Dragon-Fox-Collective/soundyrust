@@ -11,7 +11,7 @@ fn main() {
 		global_volume: GlobalVolume::new(0.2),
 		..default()
 	}))
-	.add_plugins(SoundyPlugin)
+	.add_plugins(SoundyPlugin::default())
 	.add_systems(Startup, setup)
 	.run();
 }
