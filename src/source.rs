@@ -5,7 +5,7 @@ use bevy::{audio::Source, prelude::*, utils::Duration};
 use helgoboss_midi::StructuredShortMessage;
 use rustysynth::SoundFont;
 
-use crate::midi::{MidiEvent, MidiTrack};
+use crate::midi::{MidiEvent, MidiMetaEvent, MidiTrack};
 
 #[derive(Asset, TypePath)]
 pub struct MidiAudio {
@@ -129,6 +129,13 @@ impl Iterator for MidiDecoder {
 								})
 								.collect(),
 						});
+					}
+					MidiEvent::Meta(MidiMetaEvent::Tempo {
+						tempo: beats_per_minute,
+					}) => {
+						let beats_per_second = beats_per_minute / 60.0;
+						self.ticks_per_sample = (self.midi_track.ticks_per_beat as f64
+							* beats_per_second) / self.samples_per_second;
 					}
 					_ => {}
 				}
