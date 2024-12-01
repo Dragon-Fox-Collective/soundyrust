@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use bevy::utils::hashbrown::HashMap;
 use bevy::{audio::Source, prelude::*, utils::Duration};
@@ -11,6 +11,17 @@ use crate::midi::{MidiEvent, MidiMetaEvent, MidiTrack};
 pub struct MidiAudio {
 	pub midi_track: MidiTrack,
 	pub soundfont: Arc<SoundFont>,
+	pub synced_info: Arc<Mutex<SyncedMidiInfo>>,
+}
+
+impl MidiAudio {
+	pub fn new(midi_track: MidiTrack, soundfont: Arc<SoundFont>) -> Self {
+		MidiAudio {
+			midi_track,
+			soundfont,
+			synced_info: Arc::new(Mutex::new(SyncedMidiInfo::default())),
+		}
+	}
 }
 
 pub struct MidiDecoder {
@@ -25,14 +36,21 @@ pub struct MidiDecoder {
 	tick: f64,
 	event_index: usize,
 	preset_index: HashMap<(u8, u8), usize>,
+	synced_info: Arc<Mutex<SyncedMidiInfo>>,
 }
 
 impl MidiDecoder {
-	fn new(midi_track: MidiTrack, soundfont: Arc<SoundFont>) -> Self {
+	fn new(
+		midi_track: MidiTrack,
+		soundfont: Arc<SoundFont>,
+		synced_info: Arc<Mutex<SyncedMidiInfo>>,
+	) -> Self {
 		let samples_per_second = 44100.0;
 		let beats_per_second = 120.0 / 60.0;
 		let ticks_per_beat = midi_track.ticks_per_beat as f64;
 		let ticks_per_sample = (ticks_per_beat * beats_per_second) / samples_per_second;
+
+		synced_info.lock().unwrap().beats_per_second = beats_per_second;
 
 		let channels = (0..16)
 			.map(|i| Channel {
@@ -68,6 +86,7 @@ impl MidiDecoder {
 			tick: 0.0,
 			event_index: 0,
 			preset_index,
+			synced_info,
 		}
 	}
 }
@@ -78,6 +97,11 @@ impl Iterator for MidiDecoder {
 	fn next(&mut self) -> Option<Self::Item> {
 		if self.current_audio_channel == 0 {
 			self.tick += self.ticks_per_sample;
+
+			// Not as important as the audio or tempo, so we don't need to lock it
+			if let Ok(mut synced_info) = self.synced_info.try_lock() {
+				synced_info.beat += self.ticks_per_sample / self.midi_track.ticks_per_beat as f64;
+			}
 
 			while let Some(event) = self
 				.midi_track
@@ -134,6 +158,7 @@ impl Iterator for MidiDecoder {
 						tempo: beats_per_minute,
 					}) => {
 						let beats_per_second = beats_per_minute / 60.0;
+						self.synced_info.lock().unwrap().beats_per_second = beats_per_second;
 						self.ticks_per_sample = (self.midi_track.ticks_per_beat as f64
 							* beats_per_second) / self.samples_per_second;
 					}
@@ -195,7 +220,11 @@ impl Decodable for MidiAudio {
 	type Decoder = MidiDecoder;
 
 	fn decoder(&self) -> Self::Decoder {
-		MidiDecoder::new(self.midi_track.clone(), self.soundfont.clone())
+		MidiDecoder::new(
+			self.midi_track.clone(),
+			self.soundfont.clone(),
+			self.synced_info.clone(),
+		)
 	}
 }
 
@@ -241,4 +270,10 @@ impl VoicePart {
 struct Channel {
 	bank_number: u8,
 	patch_number: u8,
+}
+
+#[derive(Default, Clone)]
+pub struct SyncedMidiInfo {
+	pub beat: f64,
+	pub beats_per_second: f64,
 }

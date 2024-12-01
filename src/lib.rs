@@ -4,11 +4,10 @@ use bevy::prelude::*;
 pub use midi::MidiTrack;
 pub use notes::Note;
 pub use rustysynth::SoundFont;
-pub use source::MidiAudio;
+pub use source::{MidiAudio, SyncedMidiInfo};
 
 mod midi;
 mod notes;
-mod soundfont;
 mod source;
 
 pub struct SoundyPlugin;
