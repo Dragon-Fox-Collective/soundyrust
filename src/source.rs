@@ -1,9 +1,9 @@
-use std::io::{self, Cursor};
+use std::sync::Arc;
 
+use bevy::utils::hashbrown::HashMap;
 use bevy::{audio::Source, prelude::*, utils::Duration};
 use helgoboss_midi::StructuredShortMessage;
-use hound::{SampleFormat, WavReader, WavSpec};
-use itertools::Itertools;
+use rustysynth::SoundFont;
 
 use crate::midi::{MidiEvent, MidiTrack};
 use crate::notes::Note;
@@ -11,84 +11,64 @@ use crate::notes::Note;
 #[derive(Asset, TypePath)]
 pub struct MidiAudio {
 	pub midi_track: MidiTrack,
-	pub bytes: &'static [u8],
-	pub baseline_note: Note,
+	pub soundfont: Arc<SoundFont>,
 }
 
 pub struct MidiDecoder {
 	midi_track: MidiTrack,
-	header: WavSpec,
-	samples: Vec<Vec<i16>>,
+	soundfont: Arc<SoundFont>,
 	voices: Vec<Voice>,
-	current_channel: u16,
-	beats_per_second: f64,
-	ticks_per_beat: f64,
+	channels: Vec<Channel>,
+	num_audio_channels: u16,
+	current_audio_channel: u16,
+	samples_per_second: f64,
 	ticks_per_sample: f64,
 	tick: f64,
 	event_index: usize,
-	baseline_note: Note,
+	preset_index: HashMap<(u8, u8), usize>,
 }
 
 impl MidiDecoder {
-	fn new<R: io::Read>(midi_track: MidiTrack, reader: WavReader<R>, baseline_note: Note) -> Self {
-		let header = reader.spec();
-
-		let samples_per_second = header.sample_rate as f64;
+	fn new(midi_track: MidiTrack, soundfont: Arc<SoundFont>) -> Self {
+		let samples_per_second = 44100.0;
 		let beats_per_second = 120.0 / 60.0;
 		let ticks_per_beat = midi_track.ticks_per_beat as f64;
 		let ticks_per_sample = (ticks_per_beat * beats_per_second) / samples_per_second;
 
+		let channels = (0..16)
+			.map(|i| Channel {
+				bank_number: if i == 9 { 128 } else { 0 },
+				patch_number: 0,
+			})
+			.collect();
+
+		let preset_index = soundfont
+			.get_presets()
+			.iter()
+			.enumerate()
+			.map(|(index, preset)| {
+				(
+					(
+						preset.get_bank_number() as u8,
+						preset.get_patch_number() as u8,
+					),
+					index,
+				)
+			})
+			.collect();
+
 		MidiDecoder {
 			midi_track,
-			header,
-			samples: match (header.sample_format, header.bits_per_sample) {
-				(SampleFormat::Float, 32) => reader
-					.into_samples()
-					.map(|value| f32_to_i16(value.unwrap()))
-					.chunks(header.channels as usize)
-					.into_iter()
-					.map(|chunk| chunk.collect())
-					.collect(),
-				(SampleFormat::Int, 8) => reader
-					.into_samples()
-					.map(|value| i8_to_i16(value.unwrap()))
-					.chunks(header.channels as usize)
-					.into_iter()
-					.map(|chunk| chunk.collect())
-					.collect(),
-				(SampleFormat::Int, 16) => reader
-					.into_samples()
-					.map(|value| value.unwrap())
-					.chunks(header.channels as usize)
-					.into_iter()
-					.map(|chunk| chunk.collect())
-					.collect(),
-				(SampleFormat::Int, 24) => reader
-					.into_samples()
-					.map(|value| i24_to_i16(value.unwrap()))
-					.chunks(header.channels as usize)
-					.into_iter()
-					.map(|chunk| chunk.collect())
-					.collect(),
-				(SampleFormat::Int, 32) => reader
-					.into_samples()
-					.map(|value| i32_to_i16(value.unwrap()))
-					.chunks(header.channels as usize)
-					.into_iter()
-					.map(|chunk| chunk.collect())
-					.collect(),
-				(sample_format, bits_per_sample) => {
-					panic!("Unimplemented wav spec: {sample_format:?}, {bits_per_sample}")
-				}
-			},
+			soundfont,
 			voices: vec![],
-			current_channel: 0,
-			beats_per_second,
-			ticks_per_beat,
+			channels,
+			num_audio_channels: 2,
+			current_audio_channel: 0,
+			samples_per_second,
 			ticks_per_sample,
 			tick: 0.0,
 			event_index: 0,
-			baseline_note,
+			preset_index,
 		}
 	}
 }
@@ -97,7 +77,7 @@ impl Iterator for MidiDecoder {
 	type Item = i16;
 
 	fn next(&mut self) -> Option<Self::Item> {
-		if self.current_channel == 0 {
+		if self.current_audio_channel == 0 {
 			self.tick += self.ticks_per_sample;
 
 			while let Some(event) = self
@@ -107,11 +87,44 @@ impl Iterator for MidiDecoder {
 				.filter(|event| event.time <= self.tick as u64)
 			{
 				match event.inner {
-					MidiEvent::Message(StructuredShortMessage::NoteOn { key_number, .. }) => {
+					MidiEvent::Message(StructuredShortMessage::NoteOn {
+						channel,
+						key_number,
+						velocity,
+					}) => {
+						let channel: usize = channel.into();
+						let channel = &self.channels[channel];
+						let Some(&preset_index) = self
+							.preset_index
+							.get(&(channel.bank_number, channel.patch_number))
+						else {
+							continue;
+						};
+						let preset = &self.soundfont.get_presets()[preset_index];
+						let Some(preset_region) = preset
+							.get_regions()
+							.iter()
+							.find(|region| region.contains(key_number.into(), velocity.into()))
+						else {
+							continue;
+						};
+						let instrument =
+							&self.soundfont.get_instruments()[preset_region.get_instrument_id()];
+						let Some(instrument_region) = instrument
+							.get_regions()
+							.iter()
+							.find(|region| region.contains(key_number.into(), velocity.into()))
+						else {
+							continue;
+						};
 						self.voices.push(Voice {
 							speed: Note::from_position(key_number.into()).frequency
-								/ self.baseline_note.frequency,
-							sample: 0.0,
+								/ Note::from_position(instrument_region.get_root_key() as u8)
+									.frequency,
+							current_sample: 0.0,
+							start_sample: instrument_region.get_sample_start() as f64,
+							end_sample: instrument_region.get_sample_end() as f64,
+							num_audio_channels: self.num_audio_channels,
 						});
 					}
 					_ => {}
@@ -129,22 +142,20 @@ impl Iterator for MidiDecoder {
 			.voices
 			.iter()
 			.map(|voice| {
-				let floor =
-					self.samples[voice.sample.floor() as usize][self.current_channel as usize];
-				let ceil =
-					self.samples[voice.sample.ceil() as usize][self.current_channel as usize];
-				let fraction = voice.sample.fract() as f32;
-				let interpolated = ceil as f32 * fraction + floor as f32 * (1.0 - fraction);
-				interpolated as i16
+				let current_sample = voice.current_sample(self.current_audio_channel);
+				let wave_data = self.soundfont.get_wave_data();
+				let floor = wave_data[current_sample.floor() as usize];
+				let ceil = wave_data[current_sample.ceil() as usize];
+				let fraction = current_sample.fract() as f32;
+				ceil as f32 * fraction + floor as f32 * (1.0 - fraction)
 			})
-			.sum();
+			.sum::<f32>() as i16;
 
-		if self.current_channel == 0 {
+		if self.current_audio_channel == 0 {
 			self.voices.iter_mut().for_each(Voice::tick);
-			self.voices
-				.retain(|voice| (voice.sample.ceil() as usize) < self.samples.len());
+			self.voices.retain(Voice::alive);
 		}
-		self.current_channel = (self.current_channel + 1) % self.header.channels;
+		self.current_audio_channel = (self.current_audio_channel + 1) % self.num_audio_channels;
 
 		Some(sample)
 	}
@@ -156,11 +167,11 @@ impl Source for MidiDecoder {
 	}
 
 	fn channels(&self) -> u16 {
-		self.header.channels
+		self.num_audio_channels
 	}
 
 	fn sample_rate(&self) -> u32 {
-		self.header.sample_rate
+		self.samples_per_second as u32
 	}
 
 	fn total_duration(&self) -> Option<Duration> {
@@ -174,54 +185,35 @@ impl Decodable for MidiAudio {
 	type Decoder = MidiDecoder;
 
 	fn decoder(&self) -> Self::Decoder {
-		MidiDecoder::new(
-			self.midi_track.clone(),
-			WavReader::new(Cursor::new(self.bytes)).unwrap(),
-			self.baseline_note,
-		)
+		MidiDecoder::new(self.midi_track.clone(), self.soundfont.clone())
 	}
 }
 
 struct Voice {
 	speed: f32,
-	sample: f64,
+	current_sample: f64,
+	start_sample: f64,
+	end_sample: f64,
+	num_audio_channels: u16,
 }
 
 impl Voice {
 	fn tick(&mut self) {
-		self.sample += self.speed as f64;
+		self.current_sample += self.speed as f64;
+	}
+
+	fn alive(&self) -> bool {
+		self.current_sample(0) < self.end_sample
+	}
+
+	fn current_sample(&self, current_audio_channel: u16) -> f64 {
+		self.start_sample
+			+ self.current_sample * self.num_audio_channels as f64
+			+ current_audio_channel as f64
 	}
 }
 
-// Taken from rodio
-
-/// Returns a 32 bit WAV float as an i16. WAV floats are typically in the range of
-/// [-1.0, 1.0] while i16s are in the range [-32768, 32767]. Note that this
-/// function definitely causes precision loss but hopefully this isn't too
-/// audiable when actually playing?
-fn f32_to_i16(f: f32) -> i16 {
-	// prefer to clip the input rather than be excessively loud.
-	(f.clamp(-1.0, 1.0) * i16::MAX as f32) as i16
-}
-
-/// Returns an 8-bit WAV int as an i16. This scales the sample value by a factor
-/// of 256.
-fn i8_to_i16(i: i8) -> i16 {
-	i as i16 * 256
-}
-
-/// Returns a 24 bit WAV int as an i16. Note that this is a 24 bit integer, not a
-/// 32 bit one. 24 bit ints are in the range [−8,388,608, 8,388,607] while i16s
-/// are in the range [-32768, 32767]. Note that this function definitely causes
-/// precision loss but hopefully this isn't too audiable when actually playing?
-fn i24_to_i16(i: i32) -> i16 {
-	(i >> 8) as i16
-}
-
-/// Returns a 32 bit WAV int as an i16. 32 bit ints are in the range
-/// [-2,147,483,648, 2,147,483,647] while i16s are in the range [-32768, 32767].
-/// Note that this function definitely causes precision loss but hopefully this
-/// isn't too audiable when actually playing?
-fn i32_to_i16(i: i32) -> i16 {
-	(i >> 16) as i16
+struct Channel {
+	bank_number: u8,
+	patch_number: u8,
 }

@@ -1,3 +1,6 @@
+use std::io::Cursor;
+use std::sync::Arc;
+
 use bevy::audio::AudioPlugin;
 use bevy::prelude::*;
 use soundyrust::*;
@@ -16,8 +19,9 @@ fn main() {
 fn setup(mut assets: ResMut<Assets<MidiAudio>>, mut commands: Commands) {
 	let audio_handle = assets.add(MidiAudio {
 		midi_track: MidiTrack::from_bytes(include_bytes!("../assets/fray.mid")),
-		bytes: include_bytes!("../assets/flute.wav"),
-		baseline_note: Note::C4,
+		soundfont: Arc::new(
+			SoundFont::new(&mut Cursor::new(include_bytes!("../assets/hl4mgm.sf2"))).unwrap(),
+		),
 	});
 	commands.spawn((AudioSourceBundle {
 		source: audio_handle,
