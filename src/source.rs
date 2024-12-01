@@ -34,6 +34,7 @@ pub struct MidiDecoder {
 	samples_per_second: f64,
 	ticks_per_sample: f64,
 	tick: f64,
+	beat: f64,
 	event_index: usize,
 	preset_index: HashMap<(u8, u8), usize>,
 	synced_info: Arc<Mutex<SyncedMidiInfo>>,
@@ -84,6 +85,7 @@ impl MidiDecoder {
 			samples_per_second,
 			ticks_per_sample,
 			tick: 0.0,
+			beat: 0.0,
 			event_index: 0,
 			preset_index,
 			synced_info,
@@ -97,10 +99,11 @@ impl Iterator for MidiDecoder {
 	fn next(&mut self) -> Option<Self::Item> {
 		if self.current_audio_channel == 0 {
 			self.tick += self.ticks_per_sample;
+			self.beat += self.ticks_per_sample / self.midi_track.ticks_per_beat as f64;
 
 			// Not as important as the audio or tempo, so we don't need to lock it
 			if let Ok(mut synced_info) = self.synced_info.try_lock() {
-				synced_info.beat += self.ticks_per_sample / self.midi_track.ticks_per_beat as f64;
+				synced_info.beat = self.beat;
 			}
 
 			while let Some(event) = self
