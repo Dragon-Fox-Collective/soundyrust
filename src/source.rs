@@ -6,7 +6,6 @@ use helgoboss_midi::StructuredShortMessage;
 use rustysynth::SoundFont;
 
 use crate::midi::{MidiEvent, MidiTrack};
-use crate::notes::Note;
 
 #[derive(Asset, TypePath)]
 pub struct MidiAudio {
@@ -92,8 +91,9 @@ impl Iterator for MidiDecoder {
 						key_number,
 						velocity,
 					}) => {
-						let channel: usize = channel.into();
-						let channel = &self.channels[channel];
+						let key_number: i32 = key_number.into();
+						let channel_index: usize = channel.into();
+						let channel = &self.channels[channel_index];
 						let Some(&preset_index) = self
 							.preset_index
 							.get(&(channel.bank_number, channel.patch_number))
@@ -101,31 +101,35 @@ impl Iterator for MidiDecoder {
 							continue;
 						};
 						let preset = &self.soundfont.get_presets()[preset_index];
-						let Some(preset_region) = preset
+						let preset_regions = preset
 							.get_regions()
 							.iter()
-							.find(|region| region.contains(key_number.into(), velocity.into()))
-						else {
-							continue;
-						};
-						let instrument =
-							&self.soundfont.get_instruments()[preset_region.get_instrument_id()];
-						let Some(instrument_region) = instrument
-							.get_regions()
-							.iter()
-							.find(|region| region.contains(key_number.into(), velocity.into()))
-						else {
-							continue;
-						};
-						self.voices.push(Voice {
-							speed: Note::from_position(key_number.into()).frequency
-								/ Note::from_position(instrument_region.get_root_key() as u8)
-									.frequency,
-							current_sample: 0.0,
-							start_sample: instrument_region.get_sample_start() as f64,
-							end_sample: instrument_region.get_sample_end() as f64,
-							num_audio_channels: self.num_audio_channels,
+							.filter(|region| region.contains(key_number, velocity.into()));
+						let instruments = preset_regions.map(|region| {
+							&self.soundfont.get_instruments()[region.get_instrument_id()]
 						});
+						let instrument_regions = instruments.flat_map(|instrument| {
+							instrument
+								.get_regions()
+								.iter()
+								.filter(|region| region.contains(key_number, velocity.into()))
+						});
+						let samples = instrument_regions.map(|region| {
+							&self.soundfont.get_sample_headers()[region.get_sample_id()]
+						});
+						self.voices.push(Voice {
+							parts: samples
+								.map(|sample| VoicePart {
+									speed: 2_f32.powf(
+										(key_number as f32 - sample.get_original_pitch() as f32)
+											/ 12.0,
+									),
+									current_sample: sample.get_start() as f64,
+									end_sample: sample.get_end() as f64,
+								})
+								.collect(),
+						});
+						println!();
 					}
 					_ => {}
 				}
@@ -190,26 +194,41 @@ impl Decodable for MidiAudio {
 }
 
 struct Voice {
-	speed: f32,
-	current_sample: f64,
-	start_sample: f64,
-	end_sample: f64,
-	num_audio_channels: u16,
+	parts: Vec<VoicePart>,
 }
 
 impl Voice {
+	fn tick(&mut self) {
+		self.parts.iter_mut().for_each(VoicePart::tick);
+	}
+
+	fn alive(&self) -> bool {
+		self.parts.iter().any(VoicePart::alive)
+	}
+
+	fn current_sample(&self, current_audio_channel: u16) -> f64 {
+		let part = &self.parts[current_audio_channel as usize % self.parts.len()];
+		if part.alive() {
+			part.current_sample
+		} else {
+			0.0
+		}
+	}
+}
+
+struct VoicePart {
+	speed: f32,
+	current_sample: f64,
+	end_sample: f64,
+}
+
+impl VoicePart {
 	fn tick(&mut self) {
 		self.current_sample += self.speed as f64;
 	}
 
 	fn alive(&self) -> bool {
-		self.current_sample(0) < self.end_sample
-	}
-
-	fn current_sample(&self, current_audio_channel: u16) -> f64 {
-		self.start_sample
-			+ self.current_sample * self.num_audio_channels as f64
-			+ current_audio_channel as f64
+		self.current_sample < self.end_sample
 	}
 }
 
