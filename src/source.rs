@@ -19,8 +19,8 @@ pub struct MidiAudio {
 	current_audio_channel: u16,
 	samples_per_second: f64,
 	ticks_per_sample: f64,
+	beats_per_second: f64,
 	tick: f64,
-	beat: f64,
 	event_index: usize,
 	preset_index: HashMap<(u8, u8), usize>,
 	buffer: Arc<Mutex<VecDeque<i16>>>,
@@ -71,8 +71,8 @@ impl MidiAudio {
 			current_audio_channel: 0,
 			samples_per_second,
 			ticks_per_sample,
+			beats_per_second,
 			tick: 0.0,
-			beat: 0.0,
 			event_index: 0,
 			preset_index,
 			buffer: Arc::new(Mutex::new(VecDeque::new())),
@@ -114,7 +114,6 @@ impl MidiAudio {
 	fn tick_once(&mut self, buffer: &mut VecDeque<MidiBufferMessage>) {
 		if self.current_audio_channel == 0 {
 			self.tick += self.ticks_per_sample;
-			self.beat += self.ticks_per_sample / self.midi_track.ticks_per_beat as f64;
 
 			while let Some(event) = self
 				.midi_track
@@ -170,10 +169,13 @@ impl MidiAudio {
 					MidiEvent::Meta(MidiMetaEvent::Tempo {
 						tempo: beats_per_minute,
 					}) => {
-						let beats_per_second = beats_per_minute / 60.0;
-						buffer.push_back(MidiBufferMessage::TempoChange { beats_per_second });
+						self.beats_per_second = beats_per_minute / 60.0;
+						buffer.push_back(MidiBufferMessage::TempoChange {
+							beats_per_second: self.beats_per_second,
+						});
 						self.ticks_per_sample = (self.midi_track.ticks_per_beat as f64
-							* beats_per_second) / self.samples_per_second;
+							* self.beats_per_second)
+							/ self.samples_per_second;
 					}
 					_ => {}
 				}
@@ -212,6 +214,10 @@ impl MidiAudio {
 		self.buffer_events
 			.retain(|(time, _)| *time > self.buffer_event_now);
 	}
+
+	pub fn beats_per_second(&self) -> f64 {
+		self.beats_per_second
+	}
 }
 
 pub struct MidiDecoder {
@@ -230,7 +236,11 @@ impl Iterator for MidiDecoder {
 
 impl Source for MidiDecoder {
 	fn current_frame_len(&self) -> Option<usize> {
-		Some(1)
+		if self.buffer.lock().unwrap().is_empty() {
+			Some(1)
+		} else {
+			None
+		}
 	}
 
 	fn channels(&self) -> u16 {
