@@ -11,16 +11,16 @@ fn main() {
 		global_volume: GlobalVolume::new(0.2),
 		..default()
 	}))
-	.add_plugins(SoundyPlugin::default())
+	.add_plugins(SoundyPlugin)
 	.add_systems(Startup, setup)
 	.run();
 }
 
 fn setup(mut assets: ResMut<Assets<MidiAudio>>, mut commands: Commands) {
-	let audio_handle = assets.add(MidiAudio::new(
+	let audio_handle = assets.add(MidiAudio::new(MidiSequencer::new(
 		MidiTrack::from_bytes(include_bytes!("../assets/fray.mid")),
 		Arc::new(SoundFont::new(&mut Cursor::new(include_bytes!("../assets/hl4mgm.sf2"))).unwrap()),
-	));
+	)));
 	commands.spawn((AudioSourceBundle {
 		source: audio_handle,
 		..default()
