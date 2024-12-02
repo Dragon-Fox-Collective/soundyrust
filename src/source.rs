@@ -1,5 +1,6 @@
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
+use std::time::Instant;
 
 use bevy::utils::hashbrown::HashMap;
 use bevy::{audio::Source, prelude::*, utils::Duration};
@@ -10,20 +11,6 @@ use crate::midi::{MidiEvent, MidiMetaEvent, MidiTrack};
 
 #[derive(Asset, TypePath)]
 pub struct MidiAudio {
-	pub sequencer: MidiSequencer,
-	pub buffer: Arc<Mutex<VecDeque<MidiBufferMessage>>>,
-}
-
-impl MidiAudio {
-	pub fn new(sequencer: MidiSequencer) -> Self {
-		MidiAudio {
-			buffer: sequencer.buffer.clone(),
-			sequencer,
-		}
-	}
-}
-
-pub struct MidiSequencer {
 	midi_track: MidiTrack,
 	soundfont: Arc<SoundFont>,
 	voices: Vec<Voice>,
@@ -36,16 +23,23 @@ pub struct MidiSequencer {
 	beat: f64,
 	event_index: usize,
 	preset_index: HashMap<(u8, u8), usize>,
-	buffer: Arc<Mutex<VecDeque<MidiBufferMessage>>>,
+	buffer: Arc<Mutex<VecDeque<i16>>>,
+	buffer_events: Vec<(Instant, MidiBufferMessage)>,
+	buffer_event_now: Instant,
 }
 
-impl MidiSequencer {
+impl MidiAudio {
 	pub fn new(midi_track: MidiTrack, soundfont: Arc<SoundFont>) -> Self {
+		let mut buffer_events = Vec::new();
+
 		let samples_per_second = 44100.0;
 		let beats_per_second = 120.0 / 60.0;
 		let ticks_per_beat = midi_track.ticks_per_beat as f64;
 		let ticks_per_sample = (ticks_per_beat * beats_per_second) / samples_per_second;
-
+		buffer_events.push((
+			Instant::now(),
+			MidiBufferMessage::TempoChange { beats_per_second },
+		));
 		let channels = (0..16)
 			.map(|i| Channel {
 				bank_number: if i == 9 { 128 } else { 0 },
@@ -82,18 +76,38 @@ impl MidiSequencer {
 			event_index: 0,
 			preset_index,
 			buffer: Arc::new(Mutex::new(VecDeque::new())),
+			buffer_events,
+			buffer_event_now: Instant::now(),
 		}
 	}
 
-	pub fn tick(&mut self, ticks: u32) {
-		let ticks = (ticks as usize).min(
-			self.samples_per_second as usize
-				- self.buffer.lock().unwrap().len() / self.num_audio_channels as usize,
-		);
+	pub fn tick(&mut self, delta: Duration) {
+		self.buffer_event_now += delta;
+
+		let ticks = delta.as_secs_f64() * self.samples_per_second;
+		let max_ticks = self.samples_per_second
+			- self.buffer.lock().unwrap().len() as f64 / self.num_audio_channels as f64;
+		let ticks = ticks.min(max_ticks) as usize;
+
 		let mut buffer = VecDeque::with_capacity(ticks);
 		for _ in 0..ticks * self.num_audio_channels as usize {
 			self.tick_once(&mut buffer);
 		}
+
+		let buffer = buffer
+			.into_iter()
+			.enumerate()
+			.filter_map(|(i, message)| match message {
+				MidiBufferMessage::Audio(sample) => Some(sample),
+				_ => {
+					self.buffer_events.push((
+						self.buffer_event_now
+							+ Duration::from_secs_f64(i as f64 / self.samples_per_second),
+						message,
+					));
+					None
+				}
+			});
 		self.buffer.lock().unwrap().extend(buffer);
 	}
 
@@ -157,6 +171,7 @@ impl MidiSequencer {
 						tempo: beats_per_minute,
 					}) => {
 						let beats_per_second = beats_per_minute / 60.0;
+						buffer.push_back(MidiBufferMessage::TempoChange { beats_per_second });
 						self.ticks_per_sample = (self.midi_track.ticks_per_beat as f64
 							* beats_per_second) / self.samples_per_second;
 					}
@@ -192,43 +207,30 @@ impl MidiSequencer {
 
 		buffer.push_back(MidiBufferMessage::Audio(sample));
 	}
+
+	pub fn clear_old_buffer_events(&mut self) {
+		self.buffer_events
+			.retain(|(time, _)| *time > self.buffer_event_now);
+	}
 }
 
 pub struct MidiDecoder {
-	buffer: Arc<Mutex<VecDeque<MidiBufferMessage>>>,
+	buffer: Arc<Mutex<VecDeque<i16>>>,
 	num_audio_channels: u16,
 	samples_per_second: u32,
-
-	last_ticks: usize,
 }
 
 impl Iterator for MidiDecoder {
 	type Item = i16;
 
 	fn next(&mut self) -> Option<Self::Item> {
-		let mut buffer = self.buffer.lock().unwrap();
-
-		if buffer.len() > self.last_ticks {
-			println!(
-				"Buffer remaining: {} (from {})",
-				buffer.len(),
-				self.last_ticks
-			);
-		}
-		self.last_ticks = buffer.len();
-
-		buffer
-			.pop_front()
-			.map(|message| match message {
-				MidiBufferMessage::Audio(sample) => sample,
-			})
-			.or(Some(0))
+		self.buffer.lock().unwrap().pop_front().or(Some(0))
 	}
 }
 
 impl Source for MidiDecoder {
 	fn current_frame_len(&self) -> Option<usize> {
-		None
+		Some(1)
 	}
 
 	fn channels(&self) -> u16 {
@@ -252,9 +254,8 @@ impl Decodable for MidiAudio {
 	fn decoder(&self) -> Self::Decoder {
 		MidiDecoder {
 			buffer: self.buffer.clone(),
-			num_audio_channels: self.sequencer.num_audio_channels,
-			samples_per_second: self.sequencer.samples_per_second as u32,
-			last_ticks: 0,
+			num_audio_channels: self.num_audio_channels,
+			samples_per_second: self.samples_per_second as u32,
 		}
 	}
 }
@@ -311,4 +312,5 @@ pub struct SyncedMidiInfo {
 
 pub enum MidiBufferMessage {
 	Audio(i16),
+	TempoChange { beats_per_second: f64 },
 }

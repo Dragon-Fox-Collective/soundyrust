@@ -1,12 +1,10 @@
-use std::time::Duration;
-
 use bevy::audio::AddAudioSource;
 use bevy::prelude::*;
 
 pub use midi::MidiTrack;
 pub use notes::Note;
 pub use rustysynth::SoundFont;
-pub use source::{MidiAudio, MidiBufferMessage, MidiSequencer, SyncedMidiInfo};
+pub use source::{MidiAudio, MidiBufferMessage, SyncedMidiInfo};
 
 mod midi;
 mod notes;
@@ -17,33 +15,19 @@ pub struct SoundyPlugin;
 impl Plugin for SoundyPlugin {
 	fn build(&self, app: &mut App) {
 		app.add_audio_source::<MidiAudio>()
-			.insert_resource(MidiTimer(Timer::new(
-				Duration::from_secs_f64(1.0 / 44100.0),
-				TimerMode::Repeating,
-			)))
-			.add_systems(PreUpdate, tick_sequencers);
+			.add_systems(PreUpdate, tick_sequencers)
+			.add_systems(PostUpdate, clear_old_buffer_events);
 	}
 }
 
-fn tick_sequencers(
-	audios: Query<&Handle<MidiAudio>>,
-	mut sequencers: ResMut<Assets<MidiAudio>>,
-	time: Res<Time>,
-	mut timer: ResMut<MidiTimer>,
-) {
-	timer.0.tick(time.delta());
-	let ticks = timer.0.times_finished_this_tick();
-	for audio in audios.iter() {
-		let audio = sequencers.get_mut(audio).unwrap();
-		let last_ticks = audio.buffer.lock().unwrap().len();
-		println!(
-			"Ticks: {} (from {})",
-			ticks as usize + last_ticks,
-			last_ticks
-		);
-		audio.sequencer.tick(ticks);
+fn tick_sequencers(mut audios: ResMut<Assets<MidiAudio>>, time: Res<Time>) {
+	for (_id, audio) in audios.iter_mut() {
+		audio.tick(time.delta());
 	}
 }
 
-#[derive(Resource)]
-pub struct MidiTimer(Timer);
+fn clear_old_buffer_events(mut audios: ResMut<Assets<MidiAudio>>) {
+	for (_id, audio) in audios.iter_mut() {
+		audio.clear_old_buffer_events();
+	}
+}
