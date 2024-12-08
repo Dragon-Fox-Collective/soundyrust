@@ -1,20 +1,21 @@
 use std::collections::VecDeque;
+use std::io::Cursor;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use bevy::utils::hashbrown::HashMap;
 use bevy::{audio::Source, prelude::*, utils::Duration};
-use helgoboss_midi::StructuredShortMessage;
+use num_enum::TryFromPrimitive;
 use rustysynth::SoundFont;
 
-use crate::midi::{MidiEvent, MidiMetaEvent, MidiTrack};
+use crate::midi::{MidiEvent, MidiTrack};
 
 #[derive(Asset, TypePath)]
 pub struct MidiAudio {
 	midi_track: MidiTrack,
 	soundfont: Arc<SoundFont>,
-	voices: Vec<Voice>,
-	channels: Vec<Channel>,
+	/// Channel => Note => Voice
+	channels: HashMap<u8, Channel>,
 	num_audio_channels: u16,
 	current_audio_channel: u16,
 	samples_per_second: f64,
@@ -41,9 +42,15 @@ impl MidiAudio {
 			MidiBufferMessage::TempoChange { beats_per_second },
 		));
 		let channels = (0..16)
-			.map(|i| Channel {
-				bank_number: if i == 9 { 128 } else { 0 },
-				patch_number: 0,
+			.map(|i| {
+				(
+					i,
+					Channel {
+						bank_number: if i == 9 { 128 } else { 0 },
+						patch_number: 0,
+						voices: HashMap::new(),
+					},
+				)
 			})
 			.collect();
 
@@ -65,7 +72,6 @@ impl MidiAudio {
 		Self {
 			midi_track,
 			soundfont,
-			voices: vec![],
 			channels,
 			num_audio_channels: 2,
 			current_audio_channel: 0,
@@ -79,6 +85,29 @@ impl MidiAudio {
 			buffer_events,
 			buffer_event_now: Instant::now(),
 		}
+	}
+
+	pub fn from_bytes(track_bytes: &[u8], soundfont_bytes: &[u8]) -> Self {
+		let midi_track = MidiTrack::from_bytes(track_bytes);
+		let soundfont = Arc::new(SoundFont::new(&mut Cursor::new(soundfont_bytes)).unwrap());
+		Self::new(midi_track, soundfont)
+	}
+
+	pub fn with_channel_patch(
+		mut self,
+		channel_number: u8,
+		bank_number: u8,
+		patch_number: u8,
+	) -> Self {
+		self.channels.insert(
+			channel_number,
+			Channel {
+				bank_number,
+				patch_number,
+				voices: HashMap::new(),
+			},
+		);
+		self
 	}
 
 	pub fn tick(&mut self, delta: Duration) {
@@ -122,53 +151,25 @@ impl MidiAudio {
 				.filter(|event| event.time <= self.tick as u64)
 			{
 				match event.inner {
-					MidiEvent::Message(StructuredShortMessage::NoteOn {
+					MidiEvent::NoteOn {
 						channel,
-						key_number,
+						note,
 						velocity,
-					}) => {
-						let key_number: i32 = key_number.into();
-						let channel_index: usize = channel.into();
-						let channel = &self.channels[channel_index];
-						let Some(&preset_index) = self
-							.preset_index
-							.get(&(channel.bank_number, channel.patch_number))
-						else {
-							continue;
-						};
-						let preset = &self.soundfont.get_presets()[preset_index];
-						let preset_regions = preset
-							.get_regions()
-							.iter()
-							.filter(|region| region.contains(key_number, velocity.into()));
-						let instruments = preset_regions.map(|region| {
-							&self.soundfont.get_instruments()[region.get_instrument_id()]
-						});
-						let instrument_regions = instruments.flat_map(|instrument| {
-							instrument
-								.get_regions()
-								.iter()
-								.filter(|region| region.contains(key_number, velocity.into()))
-						});
-						let samples = instrument_regions.map(|region| {
-							&self.soundfont.get_sample_headers()[region.get_sample_id()]
-						});
-						self.voices.push(Voice {
-							parts: samples
-								.map(|sample| VoicePart {
-									speed: 2_f32.powf(
-										(key_number as f32 - sample.get_original_pitch() as f32)
-											/ 12.0,
-									),
-									current_sample: sample.get_start() as f64,
-									end_sample: sample.get_end() as f64,
-								})
-								.collect(),
-						});
+					} => {
+						if let Some(voice) = self.create_voice(channel, note, velocity) {
+							if let Some(channel) = self.channels.get_mut(&channel) {
+								channel.voices.insert(note, voice);
+							}
+						}
 					}
-					MidiEvent::Meta(MidiMetaEvent::Tempo {
+					MidiEvent::NoteOff { channel, note } => {
+						if let Some(channel) = self.channels.get_mut(&channel) {
+							channel.voices.remove(&note);
+						}
+					}
+					MidiEvent::SetTempo {
 						tempo: beats_per_minute,
-					}) => {
+					} => {
 						self.beats_per_second = beats_per_minute / 60.0;
 						buffer.push_back(MidiBufferMessage::TempoChange {
 							beats_per_second: self.beats_per_second,
@@ -177,7 +178,6 @@ impl MidiAudio {
 							* self.beats_per_second)
 							/ self.samples_per_second;
 					}
-					_ => {}
 				}
 				self.event_index += 1;
 
@@ -189,25 +189,63 @@ impl MidiAudio {
 		}
 
 		let sample = self
-			.voices
-			.iter()
-			.map(|voice| {
-				let current_sample = voice.current_sample(self.current_audio_channel);
-				let wave_data = self.soundfont.get_wave_data();
-				let floor = wave_data[current_sample.floor() as usize];
-				let ceil = wave_data[current_sample.ceil() as usize];
-				let fraction = current_sample.fract() as f32;
-				ceil as f32 * fraction + floor as f32 * (1.0 - fraction)
-			})
-			.sum::<f32>() as i16;
+			.channels
+			.values()
+			.flat_map(|channel| channel.voices.values())
+			.map(|voice| voice.sample(self.soundfont.get_wave_data(), self.current_audio_channel))
+			.sum::<i32>()
+			.clamp(i16::MIN as i32, i16::MAX as i32) as i16;
 
 		if self.current_audio_channel == 0 {
-			self.voices.iter_mut().for_each(Voice::tick);
-			self.voices.retain(Voice::alive);
+			self.channels
+				.values_mut()
+				.flat_map(|channel| channel.voices.values_mut())
+				.for_each(Voice::tick);
 		}
 		self.current_audio_channel = (self.current_audio_channel + 1) % self.num_audio_channels;
 
 		buffer.push_back(MidiBufferMessage::Audio(sample));
+	}
+
+	fn create_voice(&self, channel_index: u8, note: u8, velocity: u8) -> Option<Voice> {
+		let note = note as i32;
+		let velocity = velocity as i32;
+
+		let channel = &self.channels[&channel_index];
+		let &preset_index = self
+			.preset_index
+			.get(&(channel.bank_number, channel.patch_number))?;
+		let preset = &self.soundfont.get_presets()[preset_index];
+		let preset_regions = preset
+			.get_regions()
+			.iter()
+			.filter(|region| region.contains(note, velocity));
+		let instruments = preset_regions
+			.map(|region| &self.soundfont.get_instruments()[region.get_instrument_id()]);
+		let instrument_regions = instruments.flat_map(|instrument| {
+			instrument
+				.get_regions()
+				.iter()
+				.filter(|region| region.contains(note, velocity))
+		});
+		let samples = instrument_regions
+			.map(|region| &self.soundfont.get_sample_headers()[region.get_sample_id()]);
+		let samples = samples
+			.map(|sample| VoiceSample {
+				speed: 2_f32.powf(
+					(note as f32 - sample.get_original_pitch() as f32
+						+ sample.get_pitch_correction() as f32 / 100.0)
+						/ 12.0,
+				),
+				current_sample: sample.get_start() as f64,
+				end_sample: sample.get_end() as f64,
+				sample_type: sample.get_sample_type().try_into().unwrap(),
+			})
+			.collect::<Vec<_>>();
+		if samples.is_empty() {
+			return None;
+		}
+		Some(Voice { samples })
 	}
 
 	pub fn clear_old_buffer_events(&mut self) {
@@ -271,47 +309,65 @@ impl Decodable for MidiAudio {
 }
 
 struct Voice {
-	parts: Vec<VoicePart>,
+	samples: Vec<VoiceSample>,
 }
 
 impl Voice {
 	fn tick(&mut self) {
-		self.parts.iter_mut().for_each(VoicePart::tick);
+		self.samples.iter_mut().for_each(VoiceSample::tick);
 	}
 
-	fn alive(&self) -> bool {
-		self.parts.iter().any(VoicePart::alive)
-	}
-
-	fn current_sample(&self, current_audio_channel: u16) -> f64 {
-		let part = &self.parts[current_audio_channel as usize % self.parts.len()];
-		if part.alive() {
-			part.current_sample
-		} else {
-			0.0
-		}
+	fn sample(&self, wave_data: &[i16], current_audio_channel: u16) -> i32 {
+		self.samples
+			.iter()
+			.filter(|sample| sample.current_sample < sample.end_sample) // Remove this once loops are implemented
+			.filter(|sample| {
+				sample.sample_type == SampleType::Mono || {
+					if current_audio_channel == 0 {
+						sample.sample_type == SampleType::Left
+					} else {
+						sample.sample_type == SampleType::Right
+					}
+				}
+			})
+			.map(|sample| sample.current_sample)
+			.map(|sample| {
+				// This seems like such a hassle... Do we really need to interpolate?
+				let floor = wave_data[sample.floor() as usize] as f32;
+				let ceil = wave_data[sample.ceil() as usize] as f32;
+				let fraction = sample.fract() as f32;
+				(ceil * fraction + floor * (1.0 - fraction)) as i32
+			})
+			.sum::<i32>()
 	}
 }
 
-struct VoicePart {
+struct VoiceSample {
 	speed: f32,
 	current_sample: f64,
 	end_sample: f64,
+	sample_type: SampleType,
 }
 
-impl VoicePart {
+impl VoiceSample {
 	fn tick(&mut self) {
 		self.current_sample += self.speed as f64;
 	}
+}
 
-	fn alive(&self) -> bool {
-		self.current_sample < self.end_sample
-	}
+#[derive(Debug, Clone, Copy, PartialEq, Eq, TryFromPrimitive)]
+#[repr(i32)]
+enum SampleType {
+	Mono = 1,
+	Right = 2,
+	Left = 4,
+	// There's also a "linked" type but I'm unsure when this would be used, usually `link` is just the other stereo channel
 }
 
 struct Channel {
 	bank_number: u8,
 	patch_number: u8,
+	voices: HashMap<u8, Voice>,
 }
 
 #[derive(Default, Clone)]
