@@ -24,8 +24,5 @@ fn setup(mut assets: ResMut<Assets<MidiAudio>>, mut commands: Commands) {
 		.with_channel_patch(2, 128, 0)
 		.with_channel_patch(3, 0, 0),
 	);
-	commands.spawn((AudioSourceBundle {
-		source: audio_handle,
-		..default()
-	},));
+	commands.spawn((AudioPlayer(audio_handle),));
 }

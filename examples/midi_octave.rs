@@ -21,8 +21,5 @@ fn setup(mut assets: ResMut<Assets<MidiAudio>>, mut commands: Commands) {
 		MidiTrack::from_bytes(include_bytes!("../assets/octave.mid")),
 		Arc::new(SoundFont::new(&mut Cursor::new(include_bytes!("../assets/hl4mgm.sf2"))).unwrap()),
 	));
-	commands.spawn((AudioSourceBundle {
-		source: audio_handle,
-		..default()
-	},));
+	commands.spawn((AudioPlayer(audio_handle),));
 }
