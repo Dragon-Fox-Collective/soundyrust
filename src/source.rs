@@ -210,6 +210,7 @@ impl MidiAudio {
 	fn create_voice(&self, channel_index: u8, note: u8, velocity: u8) -> Option<Voice> {
 		let note = note as i32;
 		let velocity = velocity as i32;
+		let volume = velocity as f32 / 127.0;
 
 		let channel = &self.channels[&channel_index];
 		let &preset_index = self
@@ -240,6 +241,7 @@ impl MidiAudio {
 				current_sample: sample.get_start() as f64,
 				end_sample: sample.get_end() as f64,
 				sample_type: sample.get_sample_type().try_into().unwrap(),
+				volume,
 			})
 			.collect::<Vec<_>>();
 		if samples.is_empty() {
@@ -330,13 +332,13 @@ impl Voice {
 					}
 				}
 			})
-			.map(|sample| sample.current_sample)
 			.map(|sample| {
 				// This seems like such a hassle... Do we really need to interpolate?
-				let floor = wave_data[sample.floor() as usize] as f32;
-				let ceil = wave_data[sample.ceil() as usize] as f32;
-				let fraction = sample.fract() as f32;
-				(ceil * fraction + floor * (1.0 - fraction)) as i32
+				let current_sample = sample.current_sample;
+				let floor = wave_data[current_sample.floor() as usize] as f32;
+				let ceil = wave_data[current_sample.ceil() as usize] as f32;
+				let fraction = current_sample.fract() as f32;
+				((ceil * fraction + floor * (1.0 - fraction)) * sample.volume) as i32
 			})
 			.sum::<i32>()
 	}
@@ -347,6 +349,7 @@ struct VoiceSample {
 	current_sample: f64,
 	end_sample: f64,
 	sample_type: SampleType,
+	volume: f32,
 }
 
 impl VoiceSample {
