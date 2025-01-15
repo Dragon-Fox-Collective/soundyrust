@@ -4,7 +4,7 @@ use bevy::prelude::*;
 pub use midi::MidiTrack;
 pub use notes::Note;
 pub use rustysynth::SoundFont;
-pub use source::{MidiAudio, MidiBufferMessage, MidiTrackAudio, SyncedMidiInfo};
+pub use source::{MidiAudio, MidiBufferMessage, MidiQueueTiming, MidiTrackAudio, SyncedMidiInfo};
 
 mod midi;
 mod notes;

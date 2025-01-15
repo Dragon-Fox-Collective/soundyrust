@@ -17,11 +17,12 @@ fn setup(mut assets: ResMut<Assets<MidiAudio>>, mut commands: Commands) {
 	let audio_handle = assets.add(
 		MidiAudio::from_bytes(include_bytes!("../assets/hl4mgm.sf2"))
 			.with_queued_track(
-				MidiTrackAudio::from_bytes(include_bytes!("../assets/fray lead.mid"))
+				MidiQueueTiming::Loop,
+				MidiTrackAudio::from_bytes(include_bytes!("../assets/fray lead.mid"), 4.0 / 4.0)
 					.with_channel_patch(0, 0, 46),
 			)
 			.with_track(
-				MidiTrackAudio::from_bytes(include_bytes!("../assets/fray backing.mid"))
+				MidiTrackAudio::from_bytes(include_bytes!("../assets/fray backing.mid"), 4.0 / 4.0)
 					.with_channel_patch(0, 0, 3)
 					.with_channel_patch(1, 128, 0)
 					.with_channel_patch(2, 0, 0),

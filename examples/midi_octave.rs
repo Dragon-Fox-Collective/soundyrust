@@ -16,7 +16,7 @@ fn main() {
 fn setup(mut assets: ResMut<Assets<MidiAudio>>, mut commands: Commands) {
 	let audio_handle = assets.add(
 		MidiAudio::from_bytes(include_bytes!("../assets/hl4mgm.sf2")).with_track(
-			MidiTrackAudio::from_bytes(include_bytes!("../assets/octave.mid")),
+			MidiTrackAudio::from_bytes(include_bytes!("../assets/octave.mid"), 4.0 / 4.0),
 		),
 	);
 	commands.spawn((AudioPlayer(audio_handle),));

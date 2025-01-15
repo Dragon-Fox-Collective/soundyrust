@@ -5,6 +5,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use bevy::utils::hashbrown::HashMap;
+use bevy::utils::HashSet;
 use bevy::{audio::Source, prelude::*, utils::Duration};
 use num_enum::TryFromPrimitive;
 use rustysynth::{SampleHeader, SoundFont};
@@ -14,7 +15,7 @@ use crate::midi::{MidiEvent, MidiTrack};
 #[derive(Asset, TypePath)]
 pub struct MidiAudio {
 	tracks: Vec<MidiTrackAudio>,
-	queued_tracks: Vec<MidiTrackAudio>,
+	queued_tracks: Vec<(MidiQueueTiming, MidiTrackAudio)>,
 	soundfont: SoundFontBank,
 	num_audio_channels: u16,
 	current_audio_channel: u16,
@@ -48,12 +49,16 @@ impl MidiAudio {
 		self
 	}
 
-	pub fn add_queued_track(&mut self, midi_track: MidiTrackAudio) {
-		self.queued_tracks.push(midi_track);
+	pub fn add_queued_track(&mut self, timing: MidiQueueTiming, midi_track: MidiTrackAudio) {
+		self.queued_tracks.push((timing, midi_track));
 	}
 
-	pub fn with_queued_track(mut self, midi_track: MidiTrackAudio) -> Self {
-		self.add_queued_track(midi_track);
+	pub fn with_queued_track(
+		mut self,
+		timing: MidiQueueTiming,
+		midi_track: MidiTrackAudio,
+	) -> Self {
+		self.add_queued_track(timing, midi_track);
 		self
 	}
 
@@ -102,15 +107,21 @@ impl MidiAudio {
 
 	fn tick_once(&mut self, buffer: &mut VecDeque<MidiBufferMessage>) {
 		if self.current_audio_channel == 0 {
-			let mut looped = false;
-			for midi_track in self.tracks.iter_mut() {
-				looped |= midi_track.tick(&self.soundfont);
+			let mut timings = HashSet::new();
+			for track in self.tracks.iter_mut() {
+				track.tick(&self.soundfont, &mut timings);
 			}
-			if looped {
-				for midi_track in self.queued_tracks.iter_mut() {
-					midi_track.tick(&self.soundfont);
-				}
-				self.tracks.append(&mut self.queued_tracks);
+			for track_index in self
+				.queued_tracks
+				.iter()
+				.enumerate()
+				.filter(|(_, (timing, _))| timings.contains(timing))
+				.map(|(i, _)| i)
+				.collect::<Vec<_>>()
+			{
+				let (_, mut track) = self.queued_tracks.remove(track_index);
+				track.tick(&self.soundfont, &mut timings);
+				self.tracks.push(track);
 			}
 		}
 
@@ -153,15 +164,19 @@ pub struct MidiTrackAudio {
 	samples_per_second: f64,
 	beats_per_second: f64,
 	tick: f64,
+	beat: f64,
 	event_index: usize,
+	beats_per_bar: f64,
 }
 
 impl MidiTrackAudio {
-	pub fn new(midi_track: MidiTrack) -> Self {
+	pub fn new(midi_track: MidiTrack, time_signature: f64) -> Self {
 		let samples_per_second = 44100.0;
 		let beats_per_second = 120.0 / 60.0;
 		let ticks_per_beat = midi_track.ticks_per_beat as f64;
 		let ticks_per_sample = (ticks_per_beat * beats_per_second) / samples_per_second;
+
+		let beats_per_bar = time_signature * 4.0;
 
 		let channels = (0..16)
 			.map(|i| {
@@ -183,12 +198,14 @@ impl MidiTrackAudio {
 			samples_per_second,
 			beats_per_second,
 			tick: 0.0,
+			beat: 0.0,
 			event_index: 0,
+			beats_per_bar,
 		}
 	}
 
-	pub fn from_bytes(track_bytes: &[u8]) -> Self {
-		Self::new(MidiTrack::from_bytes(track_bytes))
+	pub fn from_bytes(track_bytes: &[u8], time_signature: f64) -> Self {
+		Self::new(MidiTrack::from_bytes(track_bytes), time_signature)
 	}
 
 	pub fn with_channel_patch(
@@ -208,11 +225,20 @@ impl MidiTrackAudio {
 		self
 	}
 
-	/// Returns true if the track has looped
-	pub fn tick(&mut self, soundfont: &SoundFontBank) -> bool {
+	pub fn tick(&mut self, soundfont: &SoundFontBank, timings: &mut HashSet<MidiQueueTiming>) {
 		self.tick += self.ticks_per_sample;
 
-		let mut looped = false;
+		let last_beat = self.beat.floor();
+		let last_bar = (last_beat / self.beats_per_bar).floor();
+		self.beat += self.beats_per_second / self.samples_per_second;
+		let current_beat = self.beat.floor();
+		let current_bar = (current_beat / self.beats_per_bar).floor();
+		if last_beat != current_beat {
+			timings.insert(MidiQueueTiming::Beat);
+			if last_bar != current_bar {
+				timings.insert(MidiQueueTiming::Bar);
+			}
+		}
 
 		while let Some(event) = self
 			.midi_track
@@ -251,11 +277,12 @@ impl MidiTrackAudio {
 			if self.event_index >= self.midi_track.events.len() {
 				self.event_index = 0;
 				self.tick = 0.0;
-				looped = true;
+				self.beat = 0.0;
+				timings.insert(MidiQueueTiming::Loop);
+				timings.insert(MidiQueueTiming::Bar);
+				timings.insert(MidiQueueTiming::Beat);
 			}
 		}
-
-		looped
 	}
 
 	fn create_voice(
@@ -476,4 +503,11 @@ impl SoundFontBank {
 			.map(|region| &self.soundfont.get_sample_headers()[region.get_sample_id()]);
 		Some(sample_headers.collect())
 	}
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum MidiQueueTiming {
+	Loop,
+	Bar,
+	Beat,
 }

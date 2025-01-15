@@ -3,6 +3,9 @@ name = "soundyrust"
 version = "0.1.0"
 edition = "2021"
 
+[lints.clippy]
+eq_op = "allow"
+
 [dependencies]
 bevy = "0.15.0"
 augmented-midi = "1.8.0"
