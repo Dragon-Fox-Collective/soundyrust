@@ -1,6 +1,3 @@
-use std::io::Cursor;
-use std::sync::Arc;
-
 use bevy::audio::AudioPlugin;
 use bevy::prelude::*;
 use soundyrust::*;
@@ -17,9 +14,10 @@ fn main() {
 }
 
 fn setup(mut assets: ResMut<Assets<MidiAudio>>, mut commands: Commands) {
-	let audio_handle = assets.add(MidiAudio::new(
-		MidiTrack::from_bytes(include_bytes!("../assets/fray.mid")),
-		Arc::new(SoundFont::new(&mut Cursor::new(include_bytes!("../assets/hl4mgm.sf2"))).unwrap()),
-	));
+	let audio_handle = assets.add(
+		MidiAudio::from_bytes(include_bytes!("../assets/hl4mgm.sf2")).with_track(
+			MidiTrackAudio::from_bytes(include_bytes!("../assets/fray.mid")),
+		),
+	);
 	commands.spawn((AudioPlayer(audio_handle),));
 }

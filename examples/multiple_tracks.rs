@@ -15,13 +15,17 @@ fn main() {
 
 fn setup(mut assets: ResMut<Assets<MidiAudio>>, mut commands: Commands) {
 	let audio_handle = assets.add(
-		MidiAudio::from_bytes(include_bytes!("../assets/hl4mgm.sf2")).with_track(
-			MidiTrackAudio::from_bytes(include_bytes!("../assets/fray 2.mid"))
-				.with_channel_patch(0, 0, 46)
-				.with_channel_patch(1, 0, 3)
-				.with_channel_patch(2, 128, 0)
-				.with_channel_patch(3, 0, 0),
-		),
+		MidiAudio::from_bytes(include_bytes!("../assets/hl4mgm.sf2"))
+			.with_track(
+				MidiTrackAudio::from_bytes(include_bytes!("../assets/fray lead.mid"))
+					.with_channel_patch(0, 0, 46),
+			)
+			.with_track(
+				MidiTrackAudio::from_bytes(include_bytes!("../assets/fray backing.mid"))
+					.with_channel_patch(0, 0, 3)
+					.with_channel_patch(1, 128, 0)
+					.with_channel_patch(2, 0, 0),
+			),
 	);
 	commands.spawn((AudioPlayer(audio_handle),));
 }

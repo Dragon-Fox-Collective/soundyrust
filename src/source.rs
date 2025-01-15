@@ -6,108 +6,44 @@ use std::time::Instant;
 use bevy::utils::hashbrown::HashMap;
 use bevy::{audio::Source, prelude::*, utils::Duration};
 use num_enum::TryFromPrimitive;
-use rustysynth::SoundFont;
+use rustysynth::{SampleHeader, SoundFont};
 
 use crate::midi::{MidiEvent, MidiTrack};
 
 #[derive(Asset, TypePath)]
 pub struct MidiAudio {
-	midi_track: MidiTrack,
-	soundfont: Arc<SoundFont>,
-	/// Channel => Note => Voice
-	channels: HashMap<u8, Channel>,
+	midi_tracks: Vec<MidiTrackAudio>,
+	soundfont: SoundFontBank,
 	num_audio_channels: u16,
 	current_audio_channel: u16,
 	samples_per_second: f64,
-	ticks_per_sample: f64,
-	beats_per_second: f64,
-	tick: f64,
-	event_index: usize,
-	preset_index: HashMap<(u8, u8), usize>,
 	buffer: Arc<Mutex<VecDeque<i16>>>,
 	buffer_events: Vec<(Instant, MidiBufferMessage)>,
 	buffer_event_now: Instant,
 }
 
 impl MidiAudio {
-	pub fn new(midi_track: MidiTrack, soundfont: Arc<SoundFont>) -> Self {
-		let mut buffer_events = Vec::new();
-
-		let samples_per_second = 44100.0;
-		let beats_per_second = 120.0 / 60.0;
-		let ticks_per_beat = midi_track.ticks_per_beat as f64;
-		let ticks_per_sample = (ticks_per_beat * beats_per_second) / samples_per_second;
-		buffer_events.push((
-			Instant::now(),
-			MidiBufferMessage::TempoChange { beats_per_second },
-		));
-		let channels = (0..16)
-			.map(|i| {
-				(
-					i,
-					Channel {
-						bank_number: if i == 9 { 128 } else { 0 },
-						patch_number: 0,
-						voices: HashMap::new(),
-					},
-				)
-			})
-			.collect();
-
-		let preset_index = soundfont
-			.get_presets()
-			.iter()
-			.enumerate()
-			.map(|(index, preset)| {
-				(
-					(
-						preset.get_bank_number() as u8,
-						preset.get_patch_number() as u8,
-					),
-					index,
-				)
-			})
-			.collect();
-
+	pub fn new(soundfont: Arc<SoundFont>) -> Self {
 		Self {
-			midi_track,
-			soundfont,
-			channels,
+			midi_tracks: vec![],
+			soundfont: SoundFontBank::new(soundfont),
 			num_audio_channels: 2,
 			current_audio_channel: 0,
-			samples_per_second,
-			ticks_per_sample,
-			beats_per_second,
-			tick: 0.0,
-			event_index: 0,
-			preset_index,
+			samples_per_second: 44100.0,
 			buffer: Arc::new(Mutex::new(VecDeque::new())),
-			buffer_events,
+			buffer_events: vec![],
 			buffer_event_now: Instant::now(),
 		}
 	}
 
-	pub fn from_bytes(track_bytes: &[u8], soundfont_bytes: &[u8]) -> Self {
-		let midi_track = MidiTrack::from_bytes(track_bytes);
-		let soundfont = Arc::new(SoundFont::new(&mut Cursor::new(soundfont_bytes)).unwrap());
-		Self::new(midi_track, soundfont)
+	pub fn with_track(mut self, midi_track: MidiTrackAudio) -> Self {
+		self.midi_tracks.push(midi_track);
+		self
 	}
 
-	pub fn with_channel_patch(
-		mut self,
-		channel_number: u8,
-		bank_number: u8,
-		patch_number: u8,
-	) -> Self {
-		self.channels.insert(
-			channel_number,
-			Channel {
-				bank_number,
-				patch_number,
-				voices: HashMap::new(),
-			},
-		);
-		self
+	pub fn from_bytes(soundfont_bytes: &[u8]) -> Self {
+		let soundfont = Arc::new(SoundFont::new(&mut Cursor::new(soundfont_bytes)).unwrap());
+		Self::new(soundfont)
 	}
 
 	pub fn tick(&mut self, delta: Duration) {
@@ -128,6 +64,7 @@ impl MidiAudio {
 			.enumerate()
 			.filter_map(|(i, message)| match message {
 				MidiBufferMessage::Audio(sample) => Some(sample),
+				#[allow(unreachable_patterns)]
 				_ => {
 					self.buffer_events.push((
 						self.buffer_event_now
@@ -142,63 +79,29 @@ impl MidiAudio {
 
 	fn tick_once(&mut self, buffer: &mut VecDeque<MidiBufferMessage>) {
 		if self.current_audio_channel == 0 {
-			self.tick += self.ticks_per_sample;
-
-			while let Some(event) = self
-				.midi_track
-				.events
-				.get(self.event_index)
-				.filter(|event| event.time <= self.tick as u64)
-			{
-				match event.inner {
-					MidiEvent::NoteOn {
-						channel,
-						note,
-						velocity,
-					} => {
-						if let Some(voice) = self.create_voice(channel, note, velocity) {
-							if let Some(channel) = self.channels.get_mut(&channel) {
-								channel.voices.insert(note, voice);
-							}
-						}
-					}
-					MidiEvent::NoteOff { channel, note } => {
-						if let Some(channel) = self.channels.get_mut(&channel) {
-							channel.voices.remove(&note);
-						}
-					}
-					MidiEvent::SetTempo {
-						tempo: beats_per_minute,
-					} => {
-						self.beats_per_second = beats_per_minute / 60.0;
-						buffer.push_back(MidiBufferMessage::TempoChange {
-							beats_per_second: self.beats_per_second,
-						});
-						self.ticks_per_sample = (self.midi_track.ticks_per_beat as f64
-							* self.beats_per_second)
-							/ self.samples_per_second;
-					}
-				}
-				self.event_index += 1;
-
-				if self.event_index >= self.midi_track.events.len() {
-					self.event_index = 0;
-					self.tick = 0.0;
-				}
+			for midi_track in self.midi_tracks.iter_mut() {
+				midi_track.tick(&self.soundfont);
 			}
 		}
 
 		let sample = self
-			.channels
-			.values()
+			.midi_tracks
+			.iter()
+			.flat_map(|track| track.channels.values())
 			.flat_map(|channel| channel.voices.values())
-			.map(|voice| voice.sample(self.soundfont.get_wave_data(), self.current_audio_channel))
+			.map(|voice| {
+				voice.sample(
+					self.soundfont.soundfont.get_wave_data(),
+					self.current_audio_channel,
+				)
+			})
 			.sum::<i32>()
 			.clamp(i16::MIN as i32, i16::MAX as i32) as i16;
 
 		if self.current_audio_channel == 0 {
-			self.channels
-				.values_mut()
+			self.midi_tracks
+				.iter_mut()
+				.flat_map(|track| track.channels.values_mut())
 				.flat_map(|channel| channel.voices.values_mut())
 				.for_each(Voice::tick);
 		}
@@ -207,31 +110,139 @@ impl MidiAudio {
 		buffer.push_back(MidiBufferMessage::Audio(sample));
 	}
 
-	fn create_voice(&self, channel_index: u8, note: u8, velocity: u8) -> Option<Voice> {
+	pub fn clear_old_buffer_events(&mut self) {
+		self.buffer_events
+			.retain(|(time, _)| *time > self.buffer_event_now);
+	}
+}
+
+pub struct MidiTrackAudio {
+	midi_track: MidiTrack,
+	/// Track => Channel => Note => Voice
+	channels: HashMap<u8, Channel>,
+	ticks_per_sample: f64,
+	samples_per_second: f64,
+	beats_per_second: f64,
+	tick: f64,
+	event_index: usize,
+}
+
+impl MidiTrackAudio {
+	pub fn new(midi_track: MidiTrack) -> Self {
+		let samples_per_second = 44100.0;
+		let beats_per_second = 120.0 / 60.0;
+		let ticks_per_beat = midi_track.ticks_per_beat as f64;
+		let ticks_per_sample = (ticks_per_beat * beats_per_second) / samples_per_second;
+
+		let channels = (0..16)
+			.map(|i| {
+				(
+					i,
+					Channel {
+						bank_number: if i == 9 { 128 } else { 0 },
+						patch_number: 0,
+						voices: HashMap::new(),
+					},
+				)
+			})
+			.collect();
+
+		Self {
+			midi_track,
+			channels,
+			ticks_per_sample,
+			samples_per_second,
+			beats_per_second,
+			tick: 0.0,
+			event_index: 0,
+		}
+	}
+
+	pub fn from_bytes(track_bytes: &[u8]) -> Self {
+		Self::new(MidiTrack::from_bytes(track_bytes))
+	}
+
+	pub fn with_channel_patch(
+		mut self,
+		channel_number: u8,
+		bank_number: u8,
+		patch_number: u8,
+	) -> Self {
+		self.channels.insert(
+			channel_number,
+			Channel {
+				bank_number,
+				patch_number,
+				voices: HashMap::new(),
+			},
+		);
+		self
+	}
+
+	pub fn tick(&mut self, soundfont: &SoundFontBank) {
+		self.tick += self.ticks_per_sample;
+
+		while let Some(event) = self
+			.midi_track
+			.events
+			.get(self.event_index)
+			.filter(|event| event.time <= self.tick as u64)
+		{
+			match event.inner {
+				MidiEvent::NoteOn {
+					channel,
+					note,
+					velocity,
+				} => {
+					if let Some(voice) = self.create_voice(channel, note, velocity, soundfont) {
+						if let Some(channel) = self.channels.get_mut(&channel) {
+							channel.voices.insert(note, voice);
+						}
+					}
+				}
+				MidiEvent::NoteOff { channel, note } => {
+					if let Some(channel) = self.channels.get_mut(&channel) {
+						channel.voices.remove(&note);
+					}
+				}
+				MidiEvent::SetTempo {
+					tempo: beats_per_minute,
+				} => {
+					self.beats_per_second = beats_per_minute / 60.0;
+					self.ticks_per_sample = (self.midi_track.ticks_per_beat as f64
+						* self.beats_per_second)
+						/ self.samples_per_second;
+				}
+			}
+			self.event_index += 1;
+
+			if self.event_index >= self.midi_track.events.len() {
+				self.event_index = 0;
+				self.tick = 0.0;
+			}
+		}
+	}
+
+	fn create_voice(
+		&self,
+		channel_index: u8,
+		note: u8,
+		velocity: u8,
+		soundfont: &SoundFontBank,
+	) -> Option<Voice> {
 		let note = note as i32;
 		let velocity = velocity as i32;
 		let volume = velocity as f32 / 127.0;
 
 		let channel = &self.channels[&channel_index];
-		let &preset_index = self
-			.preset_index
-			.get(&(channel.bank_number, channel.patch_number))?;
-		let preset = &self.soundfont.get_presets()[preset_index];
-		let preset_regions = preset
-			.get_regions()
-			.iter()
-			.filter(|region| region.contains(note, velocity));
-		let instruments = preset_regions
-			.map(|region| &self.soundfont.get_instruments()[region.get_instrument_id()]);
-		let instrument_regions = instruments.flat_map(|instrument| {
-			instrument
-				.get_regions()
-				.iter()
-				.filter(|region| region.contains(note, velocity))
-		});
-		let samples = instrument_regions
-			.map(|region| &self.soundfont.get_sample_headers()[region.get_sample_id()]);
-		let samples = samples
+		let sample_headers = soundfont.get_sample_headers(
+			note,
+			velocity,
+			channel.bank_number,
+			channel.patch_number,
+		)?;
+		let samples = sample_headers
+			.into_iter()
 			.map(|sample| VoiceSample {
 				speed: 2_f32.powf(
 					(note as f32 - sample.get_original_pitch() as f32
@@ -248,15 +259,6 @@ impl MidiAudio {
 			return None;
 		}
 		Some(Voice { samples })
-	}
-
-	pub fn clear_old_buffer_events(&mut self) {
-		self.buffer_events
-			.retain(|(time, _)| *time > self.buffer_event_now);
-	}
-
-	pub fn beats_per_second(&self) -> f64 {
-		self.beats_per_second
 	}
 }
 
@@ -381,5 +383,58 @@ pub struct SyncedMidiInfo {
 
 pub enum MidiBufferMessage {
 	Audio(i16),
-	TempoChange { beats_per_second: f64 },
+}
+
+pub struct SoundFontBank {
+	soundfont: Arc<SoundFont>,
+	preset_index: HashMap<(u8, u8), usize>,
+}
+
+impl SoundFontBank {
+	pub fn new(soundfont: Arc<SoundFont>) -> Self {
+		let preset_index = soundfont
+			.get_presets()
+			.iter()
+			.enumerate()
+			.map(|(index, preset)| {
+				(
+					(
+						preset.get_bank_number() as u8,
+						preset.get_patch_number() as u8,
+					),
+					index,
+				)
+			})
+			.collect();
+		Self {
+			soundfont,
+			preset_index,
+		}
+	}
+
+	pub fn get_sample_headers(
+		&self,
+		note: i32,
+		velocity: i32,
+		bank_number: u8,
+		patch_number: u8,
+	) -> Option<Vec<&SampleHeader>> {
+		let &preset_index = self.preset_index.get(&(bank_number, patch_number))?;
+		let preset = &self.soundfont.get_presets()[preset_index];
+		let preset_regions = preset
+			.get_regions()
+			.iter()
+			.filter(|region| region.contains(note, velocity));
+		let instruments = preset_regions
+			.map(|region| &self.soundfont.get_instruments()[region.get_instrument_id()]);
+		let instrument_regions = instruments.flat_map(|instrument| {
+			instrument
+				.get_regions()
+				.iter()
+				.filter(|region| region.contains(note, velocity))
+		});
+		let sample_headers = instrument_regions
+			.map(|region| &self.soundfont.get_sample_headers()[region.get_sample_id()]);
+		Some(sample_headers.collect())
+	}
 }
