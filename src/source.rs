@@ -1,5 +1,6 @@
 use std::collections::VecDeque;
 use std::io::Cursor;
+use std::slice::Iter;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
@@ -137,6 +138,10 @@ impl MidiAudio {
 		self.current_audio_channel = (self.current_audio_channel + 1) % self.num_audio_channels;
 
 		buffer.push_back(MidiBufferMessage::Audio(sample));
+	}
+
+	pub fn tracks(&self) -> Iter<MidiTrackAudio> {
+		self.tracks.iter()
 	}
 }
 
@@ -289,6 +294,10 @@ impl MidiTrackAudio {
 			return None;
 		}
 		Some(Voice { samples })
+	}
+
+	pub fn beats_per_second(&self) -> f64 {
+		self.beats_per_second
 	}
 }
 
