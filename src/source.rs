@@ -12,7 +12,8 @@ use crate::midi::{MidiEvent, MidiTrack};
 
 #[derive(Asset, TypePath)]
 pub struct MidiAudio {
-	midi_tracks: Vec<MidiTrackAudio>,
+	tracks: Vec<MidiTrackAudio>,
+	queued_tracks: Vec<MidiTrackAudio>,
 	soundfont: SoundFontBank,
 	num_audio_channels: u16,
 	current_audio_channel: u16,
@@ -25,7 +26,8 @@ pub struct MidiAudio {
 impl MidiAudio {
 	pub fn new(soundfont: Arc<SoundFont>) -> Self {
 		Self {
-			midi_tracks: vec![],
+			tracks: vec![],
+			queued_tracks: vec![],
 			soundfont: SoundFontBank::new(soundfont),
 			num_audio_channels: 2,
 			current_audio_channel: 0,
@@ -36,8 +38,21 @@ impl MidiAudio {
 		}
 	}
 
+	pub fn add_track(&mut self, midi_track: MidiTrackAudio) {
+		self.tracks.push(midi_track);
+	}
+
 	pub fn with_track(mut self, midi_track: MidiTrackAudio) -> Self {
-		self.midi_tracks.push(midi_track);
+		self.add_track(midi_track);
+		self
+	}
+
+	pub fn add_queued_track(&mut self, midi_track: MidiTrackAudio) {
+		self.queued_tracks.push(midi_track);
+	}
+
+	pub fn with_queued_track(mut self, midi_track: MidiTrackAudio) -> Self {
+		self.add_queued_track(midi_track);
 		self
 	}
 
@@ -55,9 +70,7 @@ impl MidiAudio {
 		let ticks = ticks.min(max_ticks) as usize;
 
 		let mut buffer = VecDeque::with_capacity(ticks);
-		for _ in 0..ticks * self.num_audio_channels as usize {
-			self.tick_once(&mut buffer);
-		}
+		self.tick_n_times(ticks, &mut buffer);
 
 		let buffer = buffer
 			.into_iter()
@@ -75,17 +88,33 @@ impl MidiAudio {
 				}
 			});
 		self.buffer.lock().unwrap().extend(buffer);
+
+		self.buffer_events
+			.retain(|(time, _)| *time > self.buffer_event_now);
+	}
+
+	fn tick_n_times(&mut self, ticks: usize, buffer: &mut VecDeque<MidiBufferMessage>) {
+		for _ in 0..ticks * self.num_audio_channels as usize {
+			self.tick_once(buffer);
+		}
 	}
 
 	fn tick_once(&mut self, buffer: &mut VecDeque<MidiBufferMessage>) {
 		if self.current_audio_channel == 0 {
-			for midi_track in self.midi_tracks.iter_mut() {
-				midi_track.tick(&self.soundfont);
+			let mut looped = false;
+			for midi_track in self.tracks.iter_mut() {
+				looped |= midi_track.tick(&self.soundfont);
+			}
+			if looped {
+				for midi_track in self.queued_tracks.iter_mut() {
+					midi_track.tick(&self.soundfont);
+				}
+				self.tracks.append(&mut self.queued_tracks);
 			}
 		}
 
 		let sample = self
-			.midi_tracks
+			.tracks
 			.iter()
 			.flat_map(|track| track.channels.values())
 			.flat_map(|channel| channel.voices.values())
@@ -99,7 +128,7 @@ impl MidiAudio {
 			.clamp(i16::MIN as i32, i16::MAX as i32) as i16;
 
 		if self.current_audio_channel == 0 {
-			self.midi_tracks
+			self.tracks
 				.iter_mut()
 				.flat_map(|track| track.channels.values_mut())
 				.flat_map(|channel| channel.voices.values_mut())
@@ -108,11 +137,6 @@ impl MidiAudio {
 		self.current_audio_channel = (self.current_audio_channel + 1) % self.num_audio_channels;
 
 		buffer.push_back(MidiBufferMessage::Audio(sample));
-	}
-
-	pub fn clear_old_buffer_events(&mut self) {
-		self.buffer_events
-			.retain(|(time, _)| *time > self.buffer_event_now);
 	}
 }
 
@@ -179,8 +203,11 @@ impl MidiTrackAudio {
 		self
 	}
 
-	pub fn tick(&mut self, soundfont: &SoundFontBank) {
+	/// Returns true if the track has looped
+	pub fn tick(&mut self, soundfont: &SoundFontBank) -> bool {
 		self.tick += self.ticks_per_sample;
+
+		let mut looped = false;
 
 		while let Some(event) = self
 			.midi_track
@@ -219,8 +246,11 @@ impl MidiTrackAudio {
 			if self.event_index >= self.midi_track.events.len() {
 				self.event_index = 0;
 				self.tick = 0.0;
+				looped = true;
 			}
 		}
+
+		looped
 	}
 
 	fn create_voice(
