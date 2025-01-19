@@ -5,8 +5,8 @@ pub use midi::MidiTrack;
 pub use notes::Note;
 pub use rustysynth::SoundFont;
 pub use source::{
-	MidiAudio, MidiAudioTrack, MidiAudioTrackHandle, MidiBufferMessage, MidiQueueEventType,
-	MidiQueueTiming, SyncedMidiInfo,
+	MidiAudio, MidiAudioTrack, MidiAudioTrackHandle, MidiBufferMessage, MidiQueueEvent,
+	MidiQueueEventType, MidiQueueLooping, MidiQueueTiming, SyncedMidiInfo,
 };
 
 mod midi;

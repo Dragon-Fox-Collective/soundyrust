@@ -39,7 +39,7 @@ impl MidiAudio {
 
 	pub fn add_track(&mut self, midi_track: MidiAudioTrack) -> MidiAudioTrackHandle {
 		let handle = MidiAudioTrackHandle(self.tracks.len());
-		self.tracks.insert(handle.clone(), midi_track);
+		self.tracks.insert(handle, midi_track);
 		handle
 	}
 
@@ -61,7 +61,7 @@ impl MidiAudio {
 			- self.buffer.lock().unwrap().len() as f64 / self.num_audio_channels as f64;
 		let ticks = ticks.min(max_ticks) as usize;
 
-		let mut buffer = VecDeque::with_capacity(ticks);
+		let mut buffer = VecDeque::with_capacity(ticks * self.num_audio_channels as usize);
 		self.tick_n_times(ticks, &mut buffer);
 
 		let buffer = buffer
@@ -95,20 +95,30 @@ impl MidiAudio {
 		if self.current_audio_channel == 0 {
 			let mut timings = HashSet::new();
 			for track in self.tracks.values_mut().filter(|track| track.is_playing) {
-				track.tick(&self.soundfont, &mut timings);
+				track.tick_timing(&mut timings);
 			}
+
 			for track in self.tracks.values_mut() {
+				let mut new_queue = vec![];
 				track.queue.retain(|event| {
 					if timings.contains(&event.timing) {
-						match event.event {
+						match &event.event {
 							MidiQueueEventType::Play => track.is_playing = true,
 							MidiQueueEventType::Stop => track.is_playing = false,
+							MidiQueueEventType::Queue(new_event) => {
+								new_queue.push(new_event.as_ref().clone())
+							}
 						}
-						false
+						event.looping == MidiQueueLooping::Loop
 					} else {
 						true
 					}
 				});
+				track.queue.append(&mut new_queue);
+			}
+
+			for track in self.tracks.values_mut().filter(|track| track.is_playing) {
+				track.tick_midi(&self.soundfont);
 			}
 		}
 
@@ -138,25 +148,24 @@ impl MidiAudio {
 		buffer.push_back(MidiBufferMessage::Audio(sample));
 	}
 
-	pub fn tracks(&self) -> impl Iterator<Item = &MidiAudioTrack> {
-		self.tracks.values()
-	}
-
-	pub fn queue(
-		&mut self,
-		handle: MidiAudioTrackHandle,
-		event: MidiQueueEventType,
-		timing: MidiQueueTiming,
-	) {
+	pub fn queue(&mut self, handle: MidiAudioTrackHandle, event: MidiQueueEvent) {
 		if let Some(track) = self.tracks.get_mut(&handle) {
-			track.queue.push(MidiQueueEvent { timing, event })
+			track.queue.push(event)
 		}
 	}
 
-	pub fn is_playing(&self, handle: MidiAudioTrackHandle) -> bool {
+	pub fn is_playing(&self, handle: &MidiAudioTrackHandle) -> bool {
 		self.tracks
-			.get(&handle)
+			.get(handle)
 			.map_or(false, |track| track.is_playing)
+	}
+
+	pub fn beats_per_second(&self, handle: &MidiAudioTrackHandle) -> Option<f64> {
+		self.tracks.get(handle).map(|track| track.beats_per_second)
+	}
+
+	pub fn beats_per_bar(&self, handle: &MidiAudioTrackHandle) -> Option<f64> {
+		self.tracks.get(handle).map(|track| track.beats_per_bar)
 	}
 }
 
@@ -233,8 +242,8 @@ impl MidiAudioTrack {
 		self
 	}
 
-	pub fn with_queue(mut self, event: MidiQueueEventType, timing: MidiQueueTiming) -> Self {
-		self.queue.push(MidiQueueEvent { timing, event });
+	pub fn with_queue(mut self, event: MidiQueueEvent) -> Self {
+		self.queue.push(event);
 		self
 	}
 
@@ -243,21 +252,28 @@ impl MidiAudioTrack {
 		self
 	}
 
-	pub fn tick(&mut self, soundfont: &SoundFontBank, timings: &mut HashSet<MidiQueueTiming>) {
+	pub fn tick_timing(&mut self, timings: &mut HashSet<MidiQueueTiming>) {
 		self.tick += self.ticks_per_sample;
+
+		if self.beat == 0.0 {
+			timings.insert(MidiQueueTiming::Loop);
+		}
 
 		let last_beat = self.beat.floor();
 		let last_bar = (last_beat / self.beats_per_bar).floor();
 		self.beat += self.beats_per_second / self.samples_per_second;
 		let current_beat = self.beat.floor();
 		let current_bar = (current_beat / self.beats_per_bar).floor();
+
 		if last_beat != current_beat {
 			timings.insert(MidiQueueTiming::Beat);
 			if last_bar != current_bar {
 				timings.insert(MidiQueueTiming::Bar);
 			}
 		}
+	}
 
+	pub fn tick_midi(&mut self, soundfont: &SoundFontBank) {
 		while let Some(event) = self
 			.midi_track
 			.events
@@ -296,9 +312,6 @@ impl MidiAudioTrack {
 				self.event_index = 0;
 				self.tick = 0.0;
 				self.beat = 0.0;
-				timings.insert(MidiQueueTiming::Loop);
-				timings.insert(MidiQueueTiming::Bar);
-				timings.insert(MidiQueueTiming::Beat);
 			}
 		}
 	}
@@ -340,21 +353,9 @@ impl MidiAudioTrack {
 		}
 		Some(Voice { samples })
 	}
-
-	pub fn beats_per_second(&self) -> f64 {
-		self.beats_per_second
-	}
-
-	pub fn beats_per_bar(&self) -> f64 {
-		self.beats_per_bar
-	}
-
-	pub fn beat(&self) -> f64 {
-		self.beat
-	}
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct MidiAudioTrackHandle(usize);
 
 pub struct MidiDecoder {
@@ -534,9 +535,11 @@ impl SoundFontBank {
 	}
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MidiQueueEvent {
 	pub event: MidiQueueEventType,
 	pub timing: MidiQueueTiming,
+	pub looping: MidiQueueLooping,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -546,7 +549,15 @@ pub enum MidiQueueTiming {
 	Beat,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MidiQueueEventType {
 	Play,
 	Stop,
+	Queue(Box<MidiQueueEvent>),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MidiQueueLooping {
+	Loop,
+	Once,
 }

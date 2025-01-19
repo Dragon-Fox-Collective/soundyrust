@@ -26,7 +26,11 @@ fn setup(mut assets: ResMut<Assets<MidiAudio>>, mut commands: Commands) {
 				MidiAudioTrack::from_bytes(include_bytes!("../assets/fray lead.mid"), 4.0 / 4.0)
 					.with_channel_patch(0, 0, 46)
 					.stopped()
-					.with_queue(MidiQueueEventType::Play, MidiQueueTiming::Loop),
+					.with_queue(MidiQueueEvent {
+						event: MidiQueueEventType::Play,
+						timing: MidiQueueTiming::Bar,
+						looping: MidiQueueLooping::Once,
+					}),
 			),
 	);
 	commands.spawn((AudioPlayer(audio_handle),));
