@@ -1,6 +1,5 @@
 use std::collections::VecDeque;
 use std::io::Cursor;
-use std::slice::Iter;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
@@ -14,8 +13,7 @@ use crate::midi::{MidiEvent, MidiTrack};
 
 #[derive(Asset, TypePath)]
 pub struct MidiAudio {
-	tracks: Vec<MidiTrackAudio>,
-	queued_tracks: Vec<(MidiQueueTiming, MidiTrackAudio)>,
+	tracks: HashMap<MidiAudioTrackHandle, MidiAudioTrack>,
 	soundfont: SoundFontBank,
 	num_audio_channels: u16,
 	current_audio_channel: u16,
@@ -28,8 +26,7 @@ pub struct MidiAudio {
 impl MidiAudio {
 	pub fn new(soundfont: Arc<SoundFont>) -> Self {
 		Self {
-			tracks: vec![],
-			queued_tracks: vec![],
+			tracks: HashMap::new(),
 			soundfont: SoundFontBank::new(soundfont),
 			num_audio_channels: 2,
 			current_audio_channel: 0,
@@ -40,25 +37,14 @@ impl MidiAudio {
 		}
 	}
 
-	pub fn add_track(&mut self, midi_track: MidiTrackAudio) {
-		self.tracks.push(midi_track);
+	pub fn add_track(&mut self, midi_track: MidiAudioTrack) -> MidiAudioTrackHandle {
+		let handle = MidiAudioTrackHandle(self.tracks.len());
+		self.tracks.insert(handle.clone(), midi_track);
+		handle
 	}
 
-	pub fn with_track(mut self, midi_track: MidiTrackAudio) -> Self {
+	pub fn with_track(mut self, midi_track: MidiAudioTrack) -> Self {
 		self.add_track(midi_track);
-		self
-	}
-
-	pub fn add_queued_track(&mut self, timing: MidiQueueTiming, midi_track: MidiTrackAudio) {
-		self.queued_tracks.push((timing, midi_track));
-	}
-
-	pub fn with_queued_track(
-		mut self,
-		timing: MidiQueueTiming,
-		midi_track: MidiTrackAudio,
-	) -> Self {
-		self.add_queued_track(timing, midi_track);
 		self
 	}
 
@@ -108,26 +94,27 @@ impl MidiAudio {
 	fn tick_once(&mut self, buffer: &mut VecDeque<MidiBufferMessage>) {
 		if self.current_audio_channel == 0 {
 			let mut timings = HashSet::new();
-			for track in self.tracks.iter_mut() {
+			for track in self.tracks.values_mut().filter(|track| track.is_playing) {
 				track.tick(&self.soundfont, &mut timings);
 			}
-			for track_index in self
-				.queued_tracks
-				.iter()
-				.enumerate()
-				.filter(|(_, (timing, _))| timings.contains(timing))
-				.map(|(i, _)| i)
-				.collect::<Vec<_>>()
-			{
-				let (_, mut track) = self.queued_tracks.remove(track_index);
-				track.tick(&self.soundfont, &mut timings);
-				self.tracks.push(track);
+			for track in self.tracks.values_mut() {
+				track.queue.retain(|event| {
+					if timings.contains(&event.timing) {
+						match event.event {
+							MidiQueueEventType::Play => track.is_playing = true,
+							MidiQueueEventType::Stop => track.is_playing = false,
+						}
+						false
+					} else {
+						true
+					}
+				});
 			}
 		}
 
 		let sample = self
 			.tracks
-			.iter()
+			.values_mut()
 			.flat_map(|track| track.channels.values())
 			.flat_map(|channel| channel.voices.values())
 			.map(|voice| {
@@ -141,7 +128,7 @@ impl MidiAudio {
 
 		if self.current_audio_channel == 0 {
 			self.tracks
-				.iter_mut()
+				.values_mut()
 				.flat_map(|track| track.channels.values_mut())
 				.flat_map(|channel| channel.voices.values_mut())
 				.for_each(Voice::tick);
@@ -151,12 +138,29 @@ impl MidiAudio {
 		buffer.push_back(MidiBufferMessage::Audio(sample));
 	}
 
-	pub fn tracks(&self) -> Iter<MidiTrackAudio> {
-		self.tracks.iter()
+	pub fn tracks(&self) -> impl Iterator<Item = &MidiAudioTrack> {
+		self.tracks.values()
+	}
+
+	pub fn queue(
+		&mut self,
+		handle: MidiAudioTrackHandle,
+		event: MidiQueueEventType,
+		timing: MidiQueueTiming,
+	) {
+		if let Some(track) = self.tracks.get_mut(&handle) {
+			track.queue.push(MidiQueueEvent { timing, event })
+		}
+	}
+
+	pub fn is_playing(&self, handle: MidiAudioTrackHandle) -> bool {
+		self.tracks
+			.get(&handle)
+			.map_or(false, |track| track.is_playing)
 	}
 }
 
-pub struct MidiTrackAudio {
+pub struct MidiAudioTrack {
 	midi_track: MidiTrack,
 	/// Track => Channel => Note => Voice
 	channels: HashMap<u8, Channel>,
@@ -167,9 +171,11 @@ pub struct MidiTrackAudio {
 	beat: f64,
 	event_index: usize,
 	beats_per_bar: f64,
+	queue: Vec<MidiQueueEvent>,
+	is_playing: bool,
 }
 
-impl MidiTrackAudio {
+impl MidiAudioTrack {
 	pub fn new(midi_track: MidiTrack, time_signature: f64) -> Self {
 		let samples_per_second = 44100.0;
 		let beats_per_second = 120.0 / 60.0;
@@ -201,6 +207,8 @@ impl MidiTrackAudio {
 			beat: 0.0,
 			event_index: 0,
 			beats_per_bar,
+			queue: vec![],
+			is_playing: true,
 		}
 	}
 
@@ -222,6 +230,16 @@ impl MidiTrackAudio {
 				voices: HashMap::new(),
 			},
 		);
+		self
+	}
+
+	pub fn with_queue(mut self, event: MidiQueueEventType, timing: MidiQueueTiming) -> Self {
+		self.queue.push(MidiQueueEvent { timing, event });
+		self
+	}
+
+	pub fn stopped(mut self) -> Self {
+		self.is_playing = false;
 		self
 	}
 
@@ -326,7 +344,18 @@ impl MidiTrackAudio {
 	pub fn beats_per_second(&self) -> f64 {
 		self.beats_per_second
 	}
+
+	pub fn beats_per_bar(&self) -> f64 {
+		self.beats_per_bar
+	}
+
+	pub fn beat(&self) -> f64 {
+		self.beat
+	}
 }
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct MidiAudioTrackHandle(usize);
 
 pub struct MidiDecoder {
 	buffer: Arc<Mutex<VecDeque<i16>>>,
@@ -505,9 +534,19 @@ impl SoundFontBank {
 	}
 }
 
+pub struct MidiQueueEvent {
+	pub event: MidiQueueEventType,
+	pub timing: MidiQueueTiming,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum MidiQueueTiming {
 	Loop,
 	Bar,
 	Beat,
+}
+
+pub enum MidiQueueEventType {
+	Play,
+	Stop,
 }
