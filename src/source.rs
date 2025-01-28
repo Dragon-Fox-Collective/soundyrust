@@ -10,6 +10,7 @@ use num_enum::TryFromPrimitive;
 use rustysynth::{SampleHeader, SoundFont};
 
 use crate::midi::{MidiEvent, MidiTrack};
+use crate::Note;
 
 #[derive(Asset, TypePath)]
 pub struct MidiAudio {
@@ -154,6 +155,35 @@ impl MidiAudio {
 		}
 	}
 
+	pub fn start_playing_note(&mut self, note: Note) -> Result<(), NoTracksError> {
+		self.tracks
+			.get_mut(&MidiAudioTrackHandle(0))
+			.ok_or(NoTracksError)?
+			.interpret_event(
+				MidiEvent::NoteOn {
+					channel: 0,
+					note: note.position(),
+					velocity: 127,
+				},
+				&self.soundfont,
+			);
+		Ok(())
+	}
+
+	pub fn stop_playing_note(&mut self, note: Note) -> Result<(), NoTracksError> {
+		self.tracks
+			.get_mut(&MidiAudioTrackHandle(0))
+			.ok_or(NoTracksError)?
+			.interpret_event(
+				MidiEvent::NoteOff {
+					channel: 0,
+					note: note.position(),
+				},
+				&self.soundfont,
+			);
+		Ok(())
+	}
+
 	pub fn is_playing(&self, handle: &MidiAudioTrackHandle) -> bool {
 		self.tracks
 			.get(handle)
@@ -168,6 +198,9 @@ impl MidiAudio {
 		self.tracks.get(handle).map(|track| track.beats_per_bar)
 	}
 }
+
+#[derive(Debug, Default, Clone, Copy)]
+pub struct NoTracksError;
 
 pub struct MidiAudioTrack {
 	midi_track: MidiTrack,
@@ -280,38 +313,42 @@ impl MidiAudioTrack {
 			.get(self.event_index)
 			.filter(|event| event.time <= self.tick as u64)
 		{
-			match event.inner {
-				MidiEvent::NoteOn {
-					channel,
-					note,
-					velocity,
-				} => {
-					if let Some(voice) = self.create_voice(channel, note, velocity, soundfont) {
-						if let Some(channel) = self.channels.get_mut(&channel) {
-							channel.voices.insert(note, voice);
-						}
-					}
-				}
-				MidiEvent::NoteOff { channel, note } => {
-					if let Some(channel) = self.channels.get_mut(&channel) {
-						channel.voices.remove(&note);
-					}
-				}
-				MidiEvent::SetTempo {
-					tempo: beats_per_minute,
-				} => {
-					self.beats_per_second = beats_per_minute / 60.0;
-					self.ticks_per_sample = (self.midi_track.ticks_per_beat as f64
-						* self.beats_per_second)
-						/ self.samples_per_second;
-				}
-			}
+			self.interpret_event(event.inner.clone(), soundfont);
 			self.event_index += 1;
 
 			if self.event_index >= self.midi_track.events.len() {
 				self.event_index = 0;
 				self.tick = 0.0;
 				self.beat = 0.0;
+			}
+		}
+	}
+
+	pub fn interpret_event(&mut self, event: MidiEvent, soundfont: &SoundFontBank) {
+		match event {
+			MidiEvent::NoteOn {
+				channel,
+				note,
+				velocity,
+			} => {
+				if let Some(voice) = self.create_voice(channel, note, velocity, soundfont) {
+					if let Some(channel) = self.channels.get_mut(&channel) {
+						channel.voices.insert(note, voice);
+					}
+				}
+			}
+			MidiEvent::NoteOff { channel, note } => {
+				if let Some(channel) = self.channels.get_mut(&channel) {
+					channel.voices.remove(&note);
+				}
+			}
+			MidiEvent::SetTempo {
+				tempo: beats_per_minute,
+			} => {
+				self.beats_per_second = beats_per_minute / 60.0;
+				self.ticks_per_sample = (self.midi_track.ticks_per_beat as f64
+					* self.beats_per_second)
+					/ self.samples_per_second;
 			}
 		}
 	}
