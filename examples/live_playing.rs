@@ -14,16 +14,25 @@ fn main() {
 	.run();
 }
 
+#[derive(Resource)]
+struct Track(MidiAudioTrackHandle);
+
 fn setup(mut assets: ResMut<Assets<MidiAudio>>, mut commands: Commands) {
-	let audio_handle = assets.add(
-		MidiAudio::from_bytes(include_bytes!("../assets/hl4mgm.sf2")).with_track(
-			MidiAudioTrack::from_bytes(include_bytes!("../assets/octave.mid"), 4.0 / 4.0),
-		),
-	);
+	let mut audio = MidiAudio::from_bytes(include_bytes!("../assets/hl4mgm.sf2"));
+	let track = audio.add_track(MidiAudioTrack::from_bytes(
+		include_bytes!("../assets/octave.mid"),
+		4.0 / 4.0,
+	));
+	let audio_handle = assets.add(audio);
 	commands.spawn((AudioPlayer(audio_handle),));
+	commands.insert_resource(Track(track));
 }
 
-fn play_keyboard(mut assets: ResMut<Assets<MidiAudio>>, input: Res<ButtonInput<KeyCode>>) {
+fn play_keyboard(
+	mut assets: ResMut<Assets<MidiAudio>>,
+	input: Res<ButtonInput<KeyCode>>,
+	track: Res<Track>,
+) {
 	let notes = [
 		(Note::C5, KeyCode::KeyA),
 		(Note::D5, KeyCode::KeyS),
@@ -44,16 +53,14 @@ fn play_keyboard(mut assets: ResMut<Assets<MidiAudio>>, input: Res<ButtonInput<K
 				.next()
 				.unwrap()
 				.1
-				.start_playing_note(*note)
-				.unwrap();
+				.start_playing_note(*note, &track.0);
 		} else if input.just_released(*key) {
 			assets
 				.iter_mut()
 				.next()
 				.unwrap()
 				.1
-				.stop_playing_note(*note)
-				.unwrap();
+				.stop_playing_note(*note, &track.0);
 		}
 	}
 }

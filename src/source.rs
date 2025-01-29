@@ -1,7 +1,7 @@
 use std::collections::VecDeque;
 use std::io::Cursor;
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
+use std::thread;
 
 use bevy::utils::hashbrown::HashMap;
 use bevy::utils::HashSet;
@@ -14,33 +14,21 @@ use crate::Note;
 
 #[derive(Asset, TypePath)]
 pub struct MidiAudio {
-	tracks: HashMap<MidiAudioTrackHandle, MidiAudioTrack>,
-	soundfont: SoundFontBank,
-	num_audio_channels: u16,
-	current_audio_channel: u16,
-	samples_per_second: f64,
-	buffer: Arc<Mutex<VecDeque<i16>>>,
-	buffer_events: Vec<(Instant, MidiBufferMessage)>,
-	buffer_event_now: Instant,
+	tracks: Arc<Mutex<HashMap<MidiAudioTrackHandle, MidiAudioTrack>>>,
+	soundfont: Arc<Mutex<SoundFontBank>>,
 }
 
 impl MidiAudio {
 	pub fn new(soundfont: Arc<SoundFont>) -> Self {
 		Self {
-			tracks: HashMap::new(),
-			soundfont: SoundFontBank::new(soundfont),
-			num_audio_channels: 2,
-			current_audio_channel: 0,
-			samples_per_second: 44100.0,
-			buffer: Arc::new(Mutex::new(VecDeque::new())),
-			buffer_events: vec![],
-			buffer_event_now: Instant::now(),
+			tracks: Arc::new(Mutex::new(HashMap::new())),
+			soundfont: Arc::new(Mutex::new(SoundFontBank::new(soundfont))),
 		}
 	}
 
 	pub fn add_track(&mut self, midi_track: MidiAudioTrack) -> MidiAudioTrackHandle {
-		let handle = MidiAudioTrackHandle(self.tracks.len());
-		self.tracks.insert(handle, midi_track);
+		let handle = MidiAudioTrackHandle(self.tracks.lock().unwrap().len());
+		self.tracks.lock().unwrap().insert(handle, midi_track);
 		handle
 	}
 
@@ -54,148 +42,65 @@ impl MidiAudio {
 		Self::new(soundfont)
 	}
 
-	pub fn tick(&mut self, delta: Duration) {
-		self.buffer_event_now += delta;
-
-		let ticks = delta.as_secs_f64() * self.samples_per_second;
-		let max_ticks = self.samples_per_second
-			- self.buffer.lock().unwrap().len() as f64 / self.num_audio_channels as f64;
-		let ticks = ticks.min(max_ticks) as usize;
-
-		let mut buffer = VecDeque::with_capacity(ticks * self.num_audio_channels as usize);
-		self.tick_n_times(ticks, &mut buffer);
-
-		let buffer = buffer
-			.into_iter()
-			.enumerate()
-			.filter_map(|(i, message)| match message {
-				MidiBufferMessage::Audio(sample) => Some(sample),
-				#[allow(unreachable_patterns)]
-				_ => {
-					self.buffer_events.push((
-						self.buffer_event_now
-							+ Duration::from_secs_f64(i as f64 / self.samples_per_second),
-						message,
-					));
-					None
-				}
-			});
-		self.buffer.lock().unwrap().extend(buffer);
-
-		self.buffer_events
-			.retain(|(time, _)| *time > self.buffer_event_now);
-	}
-
-	fn tick_n_times(&mut self, ticks: usize, buffer: &mut VecDeque<MidiBufferMessage>) {
-		for _ in 0..ticks * self.num_audio_channels as usize {
-			self.tick_once(buffer);
-		}
-	}
-
-	fn tick_once(&mut self, buffer: &mut VecDeque<MidiBufferMessage>) {
-		if self.current_audio_channel == 0 {
-			let mut timings = HashSet::new();
-			for track in self.tracks.values_mut().filter(|track| track.is_playing) {
-				track.tick_timing(&mut timings);
-			}
-
-			for track in self.tracks.values_mut() {
-				let mut new_queue = vec![];
-				track.queue.retain(|event| {
-					if timings.contains(&event.timing) {
-						match &event.event {
-							MidiQueueEventType::Play => track.is_playing = true,
-							MidiQueueEventType::Stop => track.is_playing = false,
-							MidiQueueEventType::Queue(new_event) => {
-								new_queue.push(new_event.as_ref().clone())
-							}
-						}
-						event.looping == MidiQueueLooping::Loop
-					} else {
-						true
-					}
-				});
-				track.queue.append(&mut new_queue);
-			}
-
-			for track in self.tracks.values_mut().filter(|track| track.is_playing) {
-				track.tick_midi(&self.soundfont);
-			}
-		}
-
-		let sample = self
-			.tracks
-			.values_mut()
-			.flat_map(|track| track.channels.values())
-			.flat_map(|channel| channel.voices.values())
-			.map(|voice| {
-				voice.sample(
-					self.soundfont.soundfont.get_wave_data(),
-					self.current_audio_channel,
-				)
-			})
-			.sum::<i32>()
-			.clamp(i16::MIN as i32, i16::MAX as i32) as i16;
-
-		if self.current_audio_channel == 0 {
-			self.tracks
-				.values_mut()
-				.flat_map(|track| track.channels.values_mut())
-				.flat_map(|channel| channel.voices.values_mut())
-				.for_each(Voice::tick);
-		}
-		self.current_audio_channel = (self.current_audio_channel + 1) % self.num_audio_channels;
-
-		buffer.push_back(MidiBufferMessage::Audio(sample));
-	}
-
 	pub fn queue(&mut self, handle: MidiAudioTrackHandle, event: MidiQueueEvent) {
-		if let Some(track) = self.tracks.get_mut(&handle) {
+		if let Some(track) = self.tracks.lock().unwrap().get_mut(&handle) {
 			track.queue.push(event)
 		}
 	}
 
-	pub fn start_playing_note(&mut self, note: Note) -> Result<(), NoTracksError> {
+	pub fn start_playing_note(&mut self, note: Note, handle: &MidiAudioTrackHandle) {
 		self.tracks
-			.get_mut(&MidiAudioTrackHandle(0))
-			.ok_or(NoTracksError)?
+			.lock()
+			.unwrap()
+			.get_mut(handle)
+			.unwrap()
 			.interpret_event(
 				MidiEvent::NoteOn {
 					channel: 0,
 					note: note.position(),
 					velocity: 127,
 				},
-				&self.soundfont,
+				&self.soundfont.lock().unwrap(),
 			);
-		Ok(())
 	}
 
-	pub fn stop_playing_note(&mut self, note: Note) -> Result<(), NoTracksError> {
+	pub fn stop_playing_note(&mut self, note: Note, handle: &MidiAudioTrackHandle) {
 		self.tracks
-			.get_mut(&MidiAudioTrackHandle(0))
-			.ok_or(NoTracksError)?
+			.lock()
+			.unwrap()
+			.get_mut(handle)
+			.unwrap()
 			.interpret_event(
 				MidiEvent::NoteOff {
 					channel: 0,
 					note: note.position(),
 				},
-				&self.soundfont,
+				&self.soundfont.lock().unwrap(),
 			);
-		Ok(())
 	}
 
 	pub fn is_playing(&self, handle: &MidiAudioTrackHandle) -> bool {
 		self.tracks
+			.lock()
+			.unwrap()
 			.get(handle)
 			.map_or(false, |track| track.is_playing)
 	}
 
 	pub fn beats_per_second(&self, handle: &MidiAudioTrackHandle) -> Option<f64> {
-		self.tracks.get(handle).map(|track| track.beats_per_second)
+		self.tracks
+			.lock()
+			.unwrap()
+			.get(handle)
+			.map(|track| track.beats_per_second)
 	}
 
 	pub fn beats_per_bar(&self, handle: &MidiAudioTrackHandle) -> Option<f64> {
-		self.tracks.get(handle).map(|track| track.beats_per_bar)
+		self.tracks
+			.lock()
+			.unwrap()
+			.get(handle)
+			.map(|track| track.beats_per_bar)
 	}
 }
 
@@ -314,8 +219,8 @@ impl MidiAudioTrack {
 			.filter(|event| event.time <= self.tick as u64)
 		{
 			self.interpret_event(event.inner.clone(), soundfont);
-			self.event_index += 1;
 
+			self.event_index += 1;
 			if self.event_index >= self.midi_track.events.len() {
 				self.event_index = 0;
 				self.tick = 0.0;
@@ -396,26 +301,109 @@ impl MidiAudioTrack {
 pub struct MidiAudioTrackHandle(usize);
 
 pub struct MidiDecoder {
-	buffer: Arc<Mutex<VecDeque<i16>>>,
 	num_audio_channels: u16,
 	samples_per_second: u32,
+	_thread_handle: thread::JoinHandle<()>,
+	buffer: Arc<Mutex<VecDeque<i16>>>,
+	requested_samples: Arc<Mutex<usize>>,
+}
+
+pub struct MidiRenderer {
+	num_audio_channels: u16,
+	current_audio_channel: u16,
+	tracks: Arc<Mutex<HashMap<MidiAudioTrackHandle, MidiAudioTrack>>>,
+	soundfont: Arc<Mutex<SoundFontBank>>,
+	buffer: Arc<Mutex<VecDeque<i16>>>,
+	requested_samples: Arc<Mutex<usize>>,
+}
+
+impl MidiRenderer {
+	fn r#loop(&mut self) {
+		loop {
+			let samples = *self.requested_samples.lock().unwrap();
+			if samples > 0 {
+				let mut tracks = self.tracks.lock().unwrap();
+				let soundfont = self.soundfont.lock().unwrap();
+
+				for _ in 0..samples {
+					let sample = Self::tick(&mut tracks, &soundfont, &self.current_audio_channel);
+					self.buffer.lock().unwrap().push_back(sample);
+					self.current_audio_channel =
+						(self.current_audio_channel + 1) % self.num_audio_channels;
+				}
+
+				*self.requested_samples.lock().unwrap() -= samples;
+			}
+		}
+	}
+
+	fn tick(
+		tracks: &mut HashMap<MidiAudioTrackHandle, MidiAudioTrack>,
+		soundfont: &SoundFontBank,
+		current_audio_channel: &u16,
+	) -> i16 {
+		if *current_audio_channel == 0 {
+			let mut timings = HashSet::new();
+			for track in tracks.values_mut().filter(|track| track.is_playing) {
+				track.tick_timing(&mut timings);
+			}
+
+			for track in tracks.values_mut() {
+				let mut new_queue = vec![];
+				track.queue.retain(|event| {
+					if timings.contains(&event.timing) {
+						match &event.event {
+							MidiQueueEventType::Play => track.is_playing = true,
+							MidiQueueEventType::Stop => track.is_playing = false,
+							MidiQueueEventType::Queue(new_event) => {
+								new_queue.push(new_event.as_ref().clone())
+							}
+						}
+						event.looping == MidiQueueLooping::Loop
+					} else {
+						true
+					}
+				});
+				track.queue.append(&mut new_queue);
+			}
+
+			for track in tracks.values_mut().filter(|track| track.is_playing) {
+				track.tick_midi(soundfont);
+			}
+		}
+
+		let sample = tracks
+			.values_mut()
+			.flat_map(|track| track.channels.values())
+			.flat_map(|channel| channel.voices.values())
+			.map(|voice| voice.sample(soundfont.soundfont.get_wave_data(), *current_audio_channel))
+			.sum::<i32>()
+			.clamp(i16::MIN as i32, i16::MAX as i32) as i16;
+
+		if *current_audio_channel == 0 {
+			tracks
+				.values_mut()
+				.flat_map(|track| track.channels.values_mut())
+				.flat_map(|channel| channel.voices.values_mut())
+				.for_each(Voice::tick);
+		}
+
+		sample
+	}
 }
 
 impl Iterator for MidiDecoder {
 	type Item = i16;
 
 	fn next(&mut self) -> Option<Self::Item> {
-		self.buffer.lock().unwrap().pop_front().or(Some(0))
+		*self.requested_samples.lock().unwrap() += 1;
+		Some(self.buffer.lock().unwrap().pop_front().unwrap_or(0))
 	}
 }
 
 impl Source for MidiDecoder {
 	fn current_frame_len(&self) -> Option<usize> {
-		if self.buffer.lock().unwrap().is_empty() {
-			Some(1)
-		} else {
-			None
-		}
+		None
 	}
 
 	fn channels(&self) -> u16 {
@@ -437,10 +425,30 @@ impl Decodable for MidiAudio {
 	type Decoder = MidiDecoder;
 
 	fn decoder(&self) -> Self::Decoder {
+		let buffer = Arc::new(Mutex::new(VecDeque::new()));
+		let buffer_thread = buffer.clone();
+		let requested_samples = Arc::new(Mutex::new(0));
+		let requested_samples_thread = requested_samples.clone();
+		let tracks_thread = self.tracks.clone();
+		let soundfont_thread = self.soundfont.clone();
+
+		let handle = thread::spawn(move || {
+			MidiRenderer {
+				num_audio_channels: 2,
+				current_audio_channel: 0,
+				tracks: tracks_thread,
+				soundfont: soundfont_thread,
+				buffer: buffer_thread,
+				requested_samples: requested_samples_thread,
+			}
+			.r#loop();
+		});
 		MidiDecoder {
-			buffer: self.buffer.clone(),
-			num_audio_channels: self.num_audio_channels,
-			samples_per_second: self.samples_per_second as u32,
+			num_audio_channels: 2,
+			samples_per_second: 44100,
+			_thread_handle: handle,
+			buffer,
+			requested_samples,
 		}
 	}
 }
@@ -518,6 +526,7 @@ pub enum MidiBufferMessage {
 	Audio(i16),
 }
 
+#[derive(Clone)]
 pub struct SoundFontBank {
 	soundfont: Arc<SoundFont>,
 	preset_index: HashMap<(u8, u8), usize>,
