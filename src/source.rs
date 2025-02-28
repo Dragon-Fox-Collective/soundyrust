@@ -3,14 +3,14 @@ use std::io::Cursor;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
-use bevy::utils::hashbrown::HashMap;
 use bevy::utils::HashSet;
+use bevy::utils::hashbrown::HashMap;
 use bevy::{audio::Source, prelude::*, utils::Duration};
 use num_enum::TryFromPrimitive;
 use rustysynth::{SampleHeader, SoundFont};
 
-use crate::midi::{MidiEvent, MidiTrack};
 use crate::Note;
+use crate::midi::{MidiEvent, MidiTrack};
 
 #[derive(Asset, TypePath)]
 pub struct MidiAudio {
@@ -187,7 +187,7 @@ impl MidiAudio {
 	pub fn is_playing(&self, handle: &MidiAudioTrackHandle) -> bool {
 		self.tracks
 			.get(handle)
-			.map_or(false, |track| track.is_playing)
+			.is_some_and(|track| track.is_playing)
 	}
 
 	pub fn beats_per_second(&self, handle: &MidiAudioTrackHandle) -> Option<f64> {
